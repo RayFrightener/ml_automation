@@ -1,0 +1,4 @@
+# ignore conda environment files
+.conda/
+# ignore some other files
+Model 1 FinalGrange 2-update.ipynb
