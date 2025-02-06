@@ -2,7 +2,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, m
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def evaluate_model(model, X_train, y_train, X_test, y_test, sample_weight=None):
+def evaluate_model(model, X_train, y_train, X_test, y_test):
     """
     Evaluate the model and print performance metrics.
     
@@ -12,14 +12,20 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, sample_weight=None):
     - y_train: Training labels
     - X_test: Testing features
     - y_test: Testing labels
-    - sample_weight: Sample weights for training data (optional)
     
     Returns:
     - Dictionary containing performance metrics
+
+    When to Use the evaluate_model Function?
+
+    For Initial Training: 
+    You can use this function right after you initially train your model 
+    to get an idea of its performance on both the training and testing datasets.
+
+    After Hyperparameter Tuning: 
+    If you have already tuned your model
+    you can use this function to evaluate the model's performance.
     """
-    # Fit the model on the training data
-    model.fit(X=X_train, y=y_train, sample_weight=sample_weight)
-    
     # Make predictions on the training data
     train_predictions = model.predict(X_train)
     
