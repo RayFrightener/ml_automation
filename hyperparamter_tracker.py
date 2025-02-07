@@ -3,24 +3,30 @@ import os
 import uuid
 import datetime
 import logging
+import joblib
 import pandas as pd
 from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
+from model_evaluation import evaluate_model  # Import evaluation function
 
 class HyperparamTracker:
     """
     Hyperparameter Tracking System:
     - Logs hyperparameter configurations and performance metrics.
-    - Enables retrieval of past hyperparameter runs.
+    - Retrieves past hyperparameter runs.
     - Uses Bayesian optimization (Hyperopt) to suggest new configurations.
     - Provides human approval for AI-generated suggestions.
+    - Loads and tracks pre-trained models.
     """
 
-    def __init__(self, log_dir="hyperparam_logs"):
-        """Initialize the hyperparameter tracker with a logging directory."""
+    def __init__(self, log_dir="hyperparam_logs", model_dir="pretrained_models"):
+        """Initialize the hyperparameter tracker with a logging directory and model directory."""
         self.log_dir = log_dir
+        self.model_dir = model_dir
         os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.model_dir, exist_ok=True)
         self.db_file = os.path.join(self.log_dir, "hyperparameter_history.json")
-
+        self.models = self.load_all_models()
+        
         # Initialize storage if not available
         if not os.path.exists(self.db_file):
             with open(self.db_file, "w") as f:
@@ -38,15 +44,19 @@ class HyperparamTracker:
         logger.addHandler(handler)
         return logger
 
-    def log_hyperparameters(self, model_name, hyperparameters, metrics):
-        """
-        Logs hyperparameter configurations and their performance metrics.
+    def load_all_models(self):
+        """Loads all five pre-trained XGBoost models from disk."""
+        models = {}
+        for i in range(1, 6):
+            model_path = os.path.join(self.model_dir, f"model_{i}.joblib")
+            if os.path.exists(model_path):
+                models[f"Model_{i}"] = joblib.load(model_path)
+            else:
+                print(f"Warning: {model_path} not found.")
+        return models
 
-        Args:
-            model_name (str): Identifier for the model.
-            hyperparameters (dict): Dictionary of hyperparameter values.
-            metrics (dict): Dictionary of evaluation metrics (e.g., RMSE, MSE, MAE).
-        """
+    def log_hyperparameters(self, model_name, hyperparameters, metrics):
+        """Logs hyperparameter configurations and their performance metrics."""
         entry = {
             "run_id": str(uuid.uuid4()),
             "model_name": model_name,
@@ -69,22 +79,10 @@ class HyperparamTracker:
         self.logger.info(f"Metrics: {metrics}")
 
     def fetch_hyperparameter_history(self, model_name=None, start_date=None, end_date=None, filters=None):
-        """
-        Retrieves past hyperparameter runs based on filters.
-
-        Args:
-            model_name (str, optional): Filter by model name.
-            start_date (str, optional): Start date in YYYY-MM-DD format.
-            end_date (str, optional): End date in YYYY-MM-DD format.
-            filters (dict, optional): Key-value filters for hyperparameters.
-
-        Returns:
-            list: Filtered hyperparameter history.
-        """
+        """Retrieves past hyperparameter runs based on filters."""
         with open(self.db_file, "r") as f:
             data = json.load(f)
 
-        # Apply filters
         if model_name:
             data = [entry for entry in data if entry["model_name"] == model_name]
         if start_date:
@@ -98,40 +96,29 @@ class HyperparamTracker:
         return data
 
     def compare_hyperparameter_performance(self, model_name, metric):
-        """
-        Ranks historical runs based on a selected performance metric.
-
-        Args:
-            model_name (str): Model identifier.
-            metric (str): Metric for ranking (e.g., "RMSE", "MSE", "MAE").
-
-        Returns:
-            pd.DataFrame: Sorted dataframe of runs based on the given metric.
-        """
+        """Ranks historical runs based on a selected performance metric."""
         data = self.fetch_hyperparameter_history(model_name=model_name)
         if not data:
             return None
 
-        df = pd.DataFrame(data)
-        df = df.sort_values(by=f"metrics.{metric}", ascending=True)
+        df = pd.json_normalize(data)  # Flatten JSON structure
+        if f"metrics.{metric}" in df.columns:
+            df = df.sort_values(by=f"metrics.{metric}", ascending=True)
+        else:
+            print(f"Metric {metric} not found.")
         return df
 
     def suggest_hyperparameter_tuning(self, model_name, metric="RMSE", max_evals=50):
-        """
-        Uses Bayesian Optimization to propose new hyperparameter sets.
-
-        Args:
-            model_name (str): Model identifier.
-            metric (str): Metric to optimize (e.g., "RMSE", "MSE", "MAE").
-            max_evals (int): Number of evaluations.
-
-        Returns:
-            dict: Suggested hyperparameters.
-        """
+        """Uses Bayesian Optimization to propose new hyperparameter sets."""
         def objective(params):
-            """Objective function for Bayesian Optimization (simulated loss)."""
-            loss = sum(params.values()) / len(params)  # Dummy loss function
-            return {'loss': loss, 'status': STATUS_OK}
+            """Objective function using actual model evaluation loss."""
+            model = self.models.get(model_name)
+            if model is None:
+                print(f"Error: Model {model_name} not found.")
+                return {'loss': float('inf'), 'status': STATUS_OK}
+
+            metrics = evaluate_model(model, self.X_train, self.y_train, self.X_test, self.y_test)
+            return {'loss': metrics.get(f'test_{metric.lower()}', float('inf')), 'status': STATUS_OK}
 
         # Define search space
         space = {
@@ -144,25 +131,13 @@ class HyperparamTracker:
 
         trials = Trials()
         best_params = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=max_evals, trials=trials)
-
-        # Convert discrete values to integers
         best_params['n_estimators'] = int(best_params['n_estimators'])
 
         self.logger.info(f"Suggested hyperparameters for {model_name}: {best_params}")
         return best_params
 
     def approve_suggested_hyperparameters(self, model_name, hyperparameters, approval):
-        """
-        Allows human approval for AI-generated hyperparameter suggestions.
-
-        Args:
-            model_name (str): Model identifier.
-            hyperparameters (dict): AI-suggested hyperparameter values.
-            approval (bool): True if approved, False if rejected.
-
-        Returns:
-            dict: Approved hyperparameters or None.
-        """
+        """Allows human approval for AI-generated hyperparameter suggestions."""
         if approval:
             self.logger.info(f"Approved hyperparameters for {model_name}: {hyperparameters}")
             return hyperparameters
