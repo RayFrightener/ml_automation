@@ -1,4 +1,9 @@
 # ignore conda environment files
 .conda/
+env
 # ignore some other files
 Model 1 FinalGrange 2-update.ipynb
+Model 1 FinalGrange.ipynb
+.venv
+__pycache__
+Test Model 1 FinalGrange.ipynb

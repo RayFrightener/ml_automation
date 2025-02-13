@@ -1,6 +1,7 @@
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 
 def evaluate_model(model, X_train, y_train, X_test, y_test):
     """
@@ -30,13 +31,13 @@ def evaluate_model(model, X_train, y_train, X_test, y_test):
     train_predictions = model.predict(X_train)
     
     # Calculate RMSE for Training Data
-    train_rmse = mean_squared_error(y_train, train_predictions, squared=False)
+    train_rmse = np.sqrt(mean_squared_error(y_train, train_predictions))
     
     # Make predictions on the testing data
     test_predictions = model.predict(X_test)
     
     # Calculate RMSE for Testing Data
-    test_rmse = mean_squared_error(y_test, test_predictions, squared=False)
+    test_rmse = np.sqrt(mean_squared_error(y_test, test_predictions))
     
     # Calculate other metrics
     train_mae = mean_absolute_error(y_train, train_predictions)
@@ -74,7 +75,7 @@ def evaluate_model(model, X_train, y_train, X_test, y_test):
         "test_mape": test_mape
     }
 
-def plot_predictions(y_true, y_pred, title="Predictions vs Actual"):
+def plot_predictions(y_true, y_pred, title="Predictions vs Actual", plot_type="scatter"):
     """
     Plot predictions vs actual values.
     
@@ -82,10 +83,18 @@ def plot_predictions(y_true, y_pred, title="Predictions vs Actual"):
     - y_true: Actual values
     - y_pred: Predicted values
     - title: Plot title
+    - plot_type: Type of plot ("scatter" or "line")
     """
     plt.figure(figsize=(10, 6))
-    sns.scatterplot(x=y_true, y=y_pred)
-    plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'k--', lw=2)
+    
+    if plot_type == "scatter":
+        sns.scatterplot(x=y_true, y=y_pred)
+        plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'k--', lw=2)
+    elif plot_type == "line":
+        plt.plot(y_true, marker='o', linestyle='-', label='Actual')
+        plt.plot(y_pred, marker='o', linestyle='-', label='Predicted')
+        plt.legend()
+    
     plt.xlabel('Actual')
     plt.ylabel('Predicted')
     plt.title(title)
