@@ -1,95 +1,121 @@
-import json
-import os
-import datetime
-import logging
-import joblib
+import mlflow
+import mlflow.xgboost
 from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from model_evaluation import evaluate_model  # Import your evaluation function
-from multiprocessing import Lock
-
-# Global lock for safe JSON file access (for processes)
-json_lock = Lock()
-
+from model_evaluation import evaluate_model  # Your evaluation function should be extended to capture extra metrics if needed
+import datetime
+import logging
+import json  # For potential persistence of Trials (resumability)
 
 class HyperparamTracker:
     def __init__(self, X_train, Y_train, X_train_balanced, Y_train_balanced, X_test, Y_test,
-                 log_dir="hyperparam_logs", model_dir="pretrained_models"):
+                 data_version="v1.0", model_registry_name_prefix="HomeownerLossModel"):
         self.X_train = X_train
         self.Y_train = Y_train
         self.X_train_balanced = X_train_balanced
         self.Y_train_balanced = Y_train_balanced
         self.X_test = X_test
         self.Y_test = Y_test
-
-        self.log_dir = log_dir
-        self.model_dir = model_dir
-        os.makedirs(self.log_dir, exist_ok=True)
-        os.makedirs(self.model_dir, exist_ok=True)
-        self.db_file = os.path.join(self.log_dir, "hyperparameter_history.json")
-
-        # Setup logger before loading models
+        self.data_version = data_version  # Data versioning context
+        self.model_registry_name_prefix = model_registry_name_prefix
         self.logger = self._setup_logger()
         self.models = self.load_all_models()
+        # Optionally, load previous tuning trials from disk to resume (stub implementation)
+        self.trials = self._load_trials() or Trials()
 
     def _setup_logger(self):
         logger = logging.getLogger("HyperparamTracker")
         logger.setLevel(logging.INFO)
         if not logger.handlers:
-            handler = logging.FileHandler(os.path.join(self.log_dir, "tracking.log"))
+            handler = logging.StreamHandler()
             handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
             logger.addHandler(handler)
         return logger
 
+    def _load_trials(self):
+        # Stub: implement loading of a persisted Trials object from disk
+        try:
+            with open("trials.json", "r") as f:
+                trials_dict = json.load(f)
+            # Convert trials_dict to a Trials object if needed
+            self.logger.info("Loaded previous trials from disk.")
+            # Return a Trials object reconstructed from trials_dict (implementation-dependent)
+        except Exception as e:
+            self.logger.info("No previous trials found. Starting fresh.")
+            return None
+
+    def _save_trials(self):
+        # Stub: implement saving the current Trials object to disk for resumability
+        try:
+            # Convert self.trials to a serializable dict and save it
+            with open("trials.json", "w") as f:
+                json.dump({}, f)  # Replace with actual serialization
+            self.logger.info("Saved trials to disk.")
+        except Exception as e:
+            self.logger.error("Error saving trials: %s", e)
+
     def load_all_models(self):
+        """
+        Loads models from the MLflow Model Registry. Assumes models have been
+        registered with names like "HomeownerLossModel_Model_1" and are in the "Production" stage.
+        """
         models = {}
-        # Load models from model_dir (models must be joblib-serializable)
         for i in range(1, 6):
-            model_path = os.path.join(self.model_dir, f"model_{i}.joblib")
-            if os.path.exists(model_path):
-                try:
-                    models[f"Model_{i}"] = joblib.load(model_path)
-                except Exception as e:
-                    self.logger.error("Error loading %s: %s", model_path, e)
-            else:
-                self.logger.warning("Warning: %s not found.", model_path)
+            model_name = f"{self.model_registry_name_prefix}_Model_{i}"
+            try:
+                model = mlflow.pyfunc.load_model(f"models:/{model_name}/Production")
+                models[f"Model_{i}"] = model
+                self.logger.info("Loaded model from registry: %s", model_name)
+            except Exception as e:
+                self.logger.error("Error loading model %s: %s", model_name, e)
         return models
 
     def fetch_hyperparameter_history(self, model_name):
+        """
+        Queries MLflow to fetch past runs for the given model.
+        """
         try:
-            with json_lock:
-                if os.path.exists(self.db_file):
-                    with open(self.db_file, "r") as f:
-                        data = json.load(f)
-                else:
-                    data = []
-            history = [entry for entry in data if entry["model_name"] == model_name]
+            runs = mlflow.search_runs(filter_string=f"tags.model_name = '{model_name}'")
+            history = []
+            for _, row in runs.iterrows():
+                history.append({
+                    "model_name": model_name,
+                    "timestamp": row["start_time"],
+                    "hyperparameters": row.get("params", {}),
+                    "metrics": row.get("metrics", {})
+                })
             return history
         except Exception as e:
-            self.logger.error("Error reading hyperparameter history: %s", e)
+            self.logger.error("Error fetching hyperparameter history: %s", e)
             return []
 
-    def log_hyperparameters(self, model_name, hyperparameters, metrics):
-        entry = {
-            "model_name": model_name,
-            "timestamp": datetime.datetime.now().isoformat(),
-            "hyperparameters": hyperparameters,
-            "metrics": metrics
+    def send_notification(self, message):
+        """
+        Stub function to send notifications (e.g., email or Slack) when a new best run is found.
+        """
+        self.logger.info("Notification sent: %s", message)
+        # Integrate with your notification system here
+
+    def adjust_search_space(self, history):
+        """
+        Dynamically adjust the hyperparameter search space based on historical run data.
+        Stub implementation – you could narrow ranges if previous runs indicate trends.
+        """
+        self.logger.info("Adjusting search space based on history; current implementation is a stub.")
+        # For example, if many runs favor a lower learning rate, reduce the upper bound.
+        return {
+            'learning_rate': hp.uniform('learning_rate', 0.001, 0.1),
+            'max_depth': hp.choice('max_depth', [3, 5, 7, 9]),
+            'n_estimators': hp.quniform('n_estimators', 50, 300, 1),
+            'subsample': hp.uniform('subsample', 0.5, 1.0),
+            'colsample_bytree': hp.uniform('colsample_bytree', 0.5, 1.0),
         }
-        try:
-            with json_lock:
-                if os.path.exists(self.db_file):
-                    with open(self.db_file, "r") as f:
-                        data = json.load(f)
-                else:
-                    data = []
-                data.append(entry)
-                with open(self.db_file, "w") as f:
-                    json.dump(data, f, indent=4)
-        except Exception as e:
-            self.logger.error("Error logging hyperparameters: %s", e)
 
     def approve_suggested_hyperparameters(self, model_name, hyperparameters, approval):
+        """
+        Evaluates the suggested hyperparameters and compares the current run’s performance
+        against historical best metrics (based on test RMSE). Includes data version context.
+        """
         history = self.fetch_hyperparameter_history(model_name)
         if history:
             best_entry = history[-1]
@@ -99,38 +125,46 @@ class HyperparamTracker:
             best_hyperparams = None
             best_metrics = {"test_rmse": float("inf")}
 
-        # Evaluate new hyperparameters on current data
-        metrics = evaluate_model(
-            self.models[model_name],
-            model_name,
-            self.X_train,
-            self.Y_train,
-            self.X_train_balanced,
-            self.Y_train_balanced,
-            self.X_test,
-            self.Y_test,
-        )
+        with mlflow.start_run() as run:
+            mlflow.set_tag("model_name", model_name)
+            mlflow.log_param("data_version", self.data_version)
+            # For Model_4, use the balanced training set; otherwise, use standard.
+            if model_name == "Model_4":
+                X_train_used, Y_train_used = self.X_train_balanced, self.Y_train_balanced
+            else:
+                X_train_used, Y_train_used = self.X_train, self.Y_train
+
+            metrics = evaluate_model(
+                self.models[model_name],
+                X_train_used,
+                Y_train_used,
+                self.X_test,
+                self.Y_test
+            )
+            mlflow.log_metrics(metrics)
+        # Compare using a chosen metric; here, test_rmse
         if metrics["test_rmse"] > best_metrics.get("test_rmse", float("inf")):
             self.logger.info("New hyperparameters performed worse than previous best. Rolling back to %s.", best_hyperparams)
+            self.send_notification(f"Model {model_name}: New hyperparameters not approved due to higher RMSE.")
             return best_hyperparams
 
         if approval:
             self.logger.info("Approved new hyperparameters for %s: %s", model_name, hyperparameters)
+            self.send_notification(f"Model {model_name}: New hyperparameters approved.")
             return hyperparameters
         else:
             self.logger.warning("Rejected hyperparameters for %s.", model_name)
+            self.send_notification(f"Model {model_name}: Hyperparameter suggestion rejected.")
             return None
 
     @staticmethod
     def _tune_model(model_name, model,
                     X_train, Y_train, X_train_balanced, Y_train_balanced,
-                    X_test, Y_test, max_evals, early_stop_rounds):
+                    X_test, Y_test, max_evals, early_stop_rounds, base_trials):
         """
-        This static method performs hyperparameter tuning for a single model.
-        It uses an iterative approach to call Hyperopt until no improvement is seen
-        for `early_stop_rounds` evaluations.
+        Performs hyperparameter tuning using Hyperopt with Bayesian Optimization.
+        Each trial is logged as a nested MLflow run.
         """
-        # Set up a simple process-local logger.
         import logging
         logger = logging.getLogger(f"Tuning_{model_name}")
         if not logger.handlers:
@@ -140,53 +174,59 @@ class HyperparamTracker:
             logger.setLevel(logging.INFO)
 
         def objective(params):
-            # For Model_4 use the balanced training set.
             if model_name == "Model_4":
                 X_train_used, Y_train_used = X_train_balanced, Y_train_balanced
             else:
                 X_train_used, Y_train_used = X_train, Y_train
 
-            metrics = evaluate_model(model, model_name, X_train_used, Y_train_used, X_test, Y_test)
-            loss = metrics["test_rmse"]
+            # Log each trial as a nested MLflow run.
+            try:
+                with mlflow.start_run(nested=True) as run:
+                    mlflow.log_params(params)
+                    # You could measure training time or memory here
+                    metrics = evaluate_model(model, X_train_used, Y_train_used, X_test, Y_test)
+                    mlflow.log_metrics(metrics)
+                loss = metrics["test_rmse"]
+            except Exception as e:
+                logger.error("Exception during trial: %s", e)
+                loss = float("inf")
             return {"loss": loss, "status": STATUS_OK}
 
-        # Define the hyperparameter search space.
-        space = {
-            'learning_rate': hp.uniform('learning_rate', 0.001, 0.1),
-            'max_depth': hp.choice('max_depth', [3, 5, 7, 9]),
-            'n_estimators': hp.quniform('n_estimators', 50, 300, 1),
-            'subsample': hp.uniform('subsample', 0.5, 1.0),
-            'colsample_bytree': hp.uniform('colsample_bytree', 0.5, 1.0),
-        }
+        # Adjust the search space dynamically based on historical runs (stub)
+        search_space = HyperparamTracker.adjust_search_space(None)
+        # If you want to merge with a base search space, update accordingly.
 
-        trials = Trials()
+        # Use the provided base_trials for resumability
+        trials = base_trials
         best_loss = float("inf")
         best_params = None
         no_improvement_count = 0
 
-        # Iteratively increase max_evals by one and check for improvement.
         for i in range(max_evals):
-            result = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=i + 1, trials=trials, verbose=0)
-            current_loss = min(trials.losses())
-            if current_loss < best_loss:
-                best_loss = current_loss
-                best_params = result
-                no_improvement_count = 0
-            else:
+            try:
+                result = fmin(fn=objective, space=search_space, algo=tpe.suggest, max_evals=len(trials.trials) + 1, trials=trials, verbose=0)
+                current_loss = min(trials.losses())
+                if current_loss < best_loss:
+                    best_loss = current_loss
+                    best_params = result
+                    no_improvement_count = 0
+                else:
+                    no_improvement_count += 1
+            except Exception as e:
+                logger.error("Error in tuning loop at eval %d: %s", i + 1, e)
                 no_improvement_count += 1
 
             if no_improvement_count >= early_stop_rounds:
                 logger.info("Early stopping triggered after %d evaluations.", i + 1)
                 break
 
-        # Ensure n_estimators is an integer.
         best_params['n_estimators'] = int(best_params['n_estimators'])
         return best_params, best_loss
 
     def tune_all_models(self, max_evals=50, early_stop_rounds=10):
         """
-        Tunes all models concurrently using a process pool.
-        For each model, the best hyperparameters and the corresponding loss are logged.
+        Tunes all models concurrently. For each model, the best hyperparameters and corresponding loss
+        are logged to MLflow.
         """
         models_to_tune = ["Model_1", "Model_2", "Model_3", "Model_4", "Model_5"]
         results = {}
@@ -204,6 +244,7 @@ class HyperparamTracker:
                     self.Y_test,
                     max_evals,
                     early_stop_rounds,
+                    self.trials  # Pass the Trials object for resumability
                 ): model_name
                 for model_name in models_to_tune if model_name in self.models
             }
@@ -211,11 +252,19 @@ class HyperparamTracker:
                 model_name = futures[future]
                 try:
                     best_params, best_loss = future.result()
-                    self.log_hyperparameters(model_name, best_params, {"test_rmse": best_loss})
+                    with mlflow.start_run() as run:
+                        mlflow.set_tag("model_name", model_name)
+                        mlflow.log_param("data_version", self.data_version)
+                        mlflow.log_params(best_params)
+                        mlflow.log_metric("test_rmse", best_loss)
                     self.logger.info("Best hyperparameters for %s: %s with loss %s", model_name, best_params, best_loss)
                     results[model_name] = best_params
+                    # Send a notification about the new best run
+                    self.send_notification(f"New best hyperparameters for {model_name}: {best_params}, loss: {best_loss}")
                 except Exception as exc:
                     self.logger.error("Model %s generated an exception: %s", model_name, exc)
+        # Optionally, save the updated Trials object to disk for resumability.
+        self._save_trials()
 
         for model_name, params in results.items():
             print(f"Best hyperparameters for {model_name}: {params}")
