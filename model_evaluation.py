@@ -1,68 +1,59 @@
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
+import time
+import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
+import mlflow
 
-def evaluate_model(model, X_train, y_train, X_test, y_test):
+logger = logging.getLogger("ModelEvaluation")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
+
+def evaluate_model(model, X_train, y_train, X_test, y_test, log_to_mlflow=False):
     """
-    Evaluate the model and print performance metrics.
+    Evaluate the model and return performance metrics.
     
     Parameters:
-    - model: Trained model
-    - X_train: Training features
-    - y_train: Training labels
-    - X_test: Testing features
-    - y_test: Testing labels
+    - model: Trained model.
+    - X_train: Training features.
+    - y_train: Training labels.
+    - X_test: Testing features.
+    - y_test: Testing labels.
+    - log_to_mlflow: Boolean flag to log metrics to MLflow.
     
     Returns:
-    - Dictionary containing performance metrics
-
-    When to Use the evaluate_model Function?
-
-    For Initial Training: 
-    You can use this function right after you initially train your model 
-    to get an idea of its performance on both the training and testing datasets.
-
-    After Hyperparameter Tuning: 
-    If you have already tuned your model
-    you can use this function to evaluate the model's performance.
+    - Dictionary containing performance metrics, including prediction latency.
     """
-    # Make predictions on the training data
+    # Evaluate on training data
+    start_time = time.time()
     train_predictions = model.predict(X_train)
-    
-    # Calculate RMSE for Training Data
+    train_latency = time.time() - start_time
+
+    # Calculate training metrics
     train_rmse = np.sqrt(mean_squared_error(y_train, train_predictions))
-    
-    # Make predictions on the testing data
-    test_predictions = model.predict(X_test)
-    
-    # Calculate RMSE for Testing Data
-    test_rmse = np.sqrt(mean_squared_error(y_test, test_predictions))
-    
-    # Calculate other metrics
     train_mae = mean_absolute_error(y_train, train_predictions)
-    test_mae = mean_absolute_error(y_test, test_predictions)
     train_mse = mean_squared_error(y_train, train_predictions)
-    test_mse = mean_squared_error(y_test, test_predictions)
     train_r2 = r2_score(y_train, train_predictions)
-    test_r2 = r2_score(y_test, test_predictions)
     train_mape = mean_absolute_percentage_error(y_train, train_predictions)
+    
+    # Evaluate on testing data
+    start_time = time.time()
+    test_predictions = model.predict(X_test)
+    test_latency = time.time() - start_time
+
+    # Calculate testing metrics
+    test_rmse = np.sqrt(mean_squared_error(y_test, test_predictions))
+    test_mae = mean_absolute_error(y_test, test_predictions)
+    test_mse = mean_squared_error(y_test, test_predictions)
+    test_r2 = r2_score(y_test, test_predictions)
     test_mape = mean_absolute_percentage_error(y_test, test_predictions)
     
-    # Print metrics
-    print(f"Training RMSE: {train_rmse}")
-    print(f"Testing RMSE: {test_rmse}")
-    print(f"Training MAE: {train_mae}")
-    print(f"Testing MAE: {test_mae}")
-    print(f"Training MSE: {train_mse}")
-    print(f"Testing MSE: {test_mse}")
-    print(f"Training R2: {train_r2}")
-    print(f"Testing R2: {test_r2}")
-    print(f"Training MAPE: {train_mape}")
-    print(f"Testing MAPE: {test_mape}")
-    
-    # Return metrics as a dictionary
-    return {
+    # Aggregate metrics
+    metrics = {
         "train_rmse": train_rmse,
         "test_rmse": test_rmse,
         "train_mae": train_mae,
@@ -72,24 +63,39 @@ def evaluate_model(model, X_train, y_train, X_test, y_test):
         "train_r2": train_r2,
         "test_r2": test_r2,
         "train_mape": train_mape,
-        "test_mape": test_mape
+        "test_mape": test_mape,
+        "train_latency_sec": train_latency,
+        "test_latency_sec": test_latency
     }
+    
+    # Log metrics using logger
+    logger.info("Training Metrics: RMSE=%.4f, MAE=%.4f, MSE=%.4f, R2=%.4f, MAPE=%.4f, Latency=%.4f sec", 
+                train_rmse, train_mae, train_mse, train_r2, train_mape, train_latency)
+    logger.info("Testing Metrics: RMSE=%.4f, MAE=%.4f, MSE=%.4f, R2=%.4f, MAPE=%.4f, Latency=%.4f sec", 
+                test_rmse, test_mae, test_mse, test_r2, test_mape, test_latency)
+    
+    # Optionally log to MLflow if requested and run is active
+    if log_to_mlflow and mlflow.active_run():
+        mlflow.log_metrics(metrics)
+    
+    return metrics
 
-def plot_predictions(y_true, y_pred, title="Predictions vs Actual", plot_type="scatter"):
+def plot_predictions(y_true, y_pred, title="Predictions vs Actual", plot_type="scatter", log_to_mlflow=False):
     """
-    Plot predictions vs actual values.
+    Plot predictions vs actual values and optionally log the plot as an MLflow artifact.
     
     Parameters:
-    - y_true: Actual values
-    - y_pred: Predicted values
-    - title: Plot title
-    - plot_type: Type of plot ("scatter" or "line")
+    - y_true: Actual values.
+    - y_pred: Predicted values.
+    - title: Plot title.
+    - plot_type: Type of plot ("scatter" or "line").
+    - log_to_mlflow: Boolean flag to log the figure to MLflow.
     """
     plt.figure(figsize=(10, 6))
     
     if plot_type == "scatter":
         sns.scatterplot(x=y_true, y=y_pred)
-        plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'k--', lw=2)
+        plt.plot([np.min(y_true), np.max(y_true)], [np.min(y_true), np.max(y_true)], 'k--', lw=2)
     elif plot_type == "line":
         plt.plot(y_true, marker='o', linestyle='-', label='Actual')
         plt.plot(y_pred, marker='o', linestyle='-', label='Predicted')
@@ -98,4 +104,12 @@ def plot_predictions(y_true, y_pred, title="Predictions vs Actual", plot_type="s
     plt.xlabel('Actual')
     plt.ylabel('Predicted')
     plt.title(title)
+    
+    if log_to_mlflow and mlflow.active_run():
+        # Save figure to a temporary file and log it as an artifact
+        temp_path = "predictions_plot.png"
+        plt.savefig(temp_path)
+        mlflow.log_artifact(temp_path, artifact_path="plots")
+        logger.info("Logged prediction plot to MLflow as artifact.")
+    
     plt.show()
