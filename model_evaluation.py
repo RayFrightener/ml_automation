@@ -3,7 +3,12 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    mean_absolute_percentage_error
+)
 import mlflow
 
 logger = logging.getLogger("ModelEvaluation")
@@ -13,7 +18,15 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(handler)
 
-def evaluate_model(model, X_train, y_train, X_test, y_test, log_to_mlflow=False):
+def evaluate_model(
+    model,
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    log_to_mlflow=False,
+    return_predictions=False
+):
     """
     Evaluate the model and return performance metrics.
     
@@ -24,9 +37,11 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, log_to_mlflow=False)
     - X_test: Testing features.
     - y_test: Testing labels.
     - log_to_mlflow: Boolean flag to log metrics to MLflow.
-    
+    - return_predictions: If True, also return train & test predictions.
+
     Returns:
-    - Dictionary containing performance metrics, including prediction latency.
+    - A dictionary containing performance metrics.
+      If return_predictions=True, also includes 'train_predictions' and 'test_predictions'.
     """
     # Evaluate on training data
     start_time = time.time()
@@ -69,18 +84,37 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, log_to_mlflow=False)
     }
     
     # Log metrics using logger
-    logger.info("Training Metrics: RMSE=%.4f, MAE=%.4f, MSE=%.4f, R2=%.4f, MAPE=%.4f, Latency=%.4f sec", 
-                train_rmse, train_mae, train_mse, train_r2, train_mape, train_latency)
-    logger.info("Testing Metrics: RMSE=%.4f, MAE=%.4f, MSE=%.4f, R2=%.4f, MAPE=%.4f, Latency=%.4f sec", 
-                test_rmse, test_mae, test_mse, test_r2, test_mape, test_latency)
+    logger.info(
+        "Training Metrics: RMSE=%.4f, MAE=%.4f, MSE=%.4f, R2=%.4f, MAPE=%.4f, Latency=%.4f sec",
+        train_rmse, train_mae, train_mse, train_r2, train_mape, train_latency
+    )
+    logger.info(
+        "Testing Metrics: RMSE=%.4f, MAE=%.4f, MSE=%.4f, R2=%.4f, MAPE=%.4f, Latency=%.4f sec",
+        test_rmse, test_mae, test_mse, test_r2, test_mape, test_latency
+    )
     
     # Optionally log to MLflow if requested and run is active
     if log_to_mlflow and mlflow.active_run():
         mlflow.log_metrics(metrics)
-    
-    return metrics
 
-def plot_predictions(y_true, y_pred, title="Predictions vs Actual", plot_type="scatter", log_to_mlflow=False):
+    # If user wants predictions, return them in addition to metrics
+    if return_predictions:
+        return {
+            "metrics": metrics,
+            "train_predictions": train_predictions,
+            "test_predictions": test_predictions
+        }
+    else:
+        return metrics
+
+def plot_predictions(
+    y_true,
+    y_pred,
+    title="Predictions vs Actual",
+    plot_type="scatter",
+    log_to_mlflow=False,
+    filename="predictions_plot.png"
+):
     """
     Plot predictions vs actual values and optionally log the plot as an MLflow artifact.
     
@@ -90,12 +124,15 @@ def plot_predictions(y_true, y_pred, title="Predictions vs Actual", plot_type="s
     - title: Plot title.
     - plot_type: Type of plot ("scatter" or "line").
     - log_to_mlflow: Boolean flag to log the figure to MLflow.
+    - filename: Filename for the saved figure artifact.
     """
     plt.figure(figsize=(10, 6))
     
     if plot_type == "scatter":
         sns.scatterplot(x=y_true, y=y_pred)
-        plt.plot([np.min(y_true), np.max(y_true)], [np.min(y_true), np.max(y_true)], 'k--', lw=2)
+        # Diagonal line
+        plt.plot([np.min(y_true), np.max(y_true)],
+                 [np.min(y_true), np.max(y_true)], 'k--', lw=2)
     elif plot_type == "line":
         plt.plot(y_true, marker='o', linestyle='-', label='Actual')
         plt.plot(y_pred, marker='o', linestyle='-', label='Predicted')
@@ -106,10 +143,8 @@ def plot_predictions(y_true, y_pred, title="Predictions vs Actual", plot_type="s
     plt.title(title)
     
     if log_to_mlflow and mlflow.active_run():
-        # Save figure to a temporary file and log it as an artifact
-        temp_path = "predictions_plot.png"
-        plt.savefig(temp_path)
-        mlflow.log_artifact(temp_path, artifact_path="plots")
-        logger.info("Logged prediction plot to MLflow as artifact.")
+        plt.savefig(filename)
+        mlflow.log_artifact(filename, artifact_path="plots")
+        logger.info("Logged prediction plot to MLflow as artifact: %s", filename)
     
     plt.show()
