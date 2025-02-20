@@ -4,10 +4,11 @@ import mlflow
 import mlflow.xgboost
 from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from model_evaluation import evaluate_model  # Your evaluation function
+from model_evaluation import evaluate_model, plot_predictions
 import datetime
 import logging
 import json
+import numpy as np
 
 class HyperparamTracker:
     def __init__(
@@ -26,8 +27,6 @@ class HyperparamTracker:
           - Reads CSV files directly from S3 to build your X_train, Y_train, etc.
           - Ignores advanced ingestion pipeline steps.
         """
-
-        # Example: read from S3 URIs using Pandas
         self.X_train = pd.read_csv(s3_uri_X_train)
         self.Y_train = pd.read_csv(s3_uri_Y_train)
         self.X_train_balanced = pd.read_csv(s3_uri_X_train_balanced)
@@ -58,8 +57,7 @@ class HyperparamTracker:
             with open("trials.json", "r") as f:
                 trials_dict = json.load(f)
             self.logger.info("Loaded previous trials from disk.")
-            # Convert trials_dict to a Trials() if you want to actually resume
-            # This is just a stub
+            # Conversion to Trials is stubbed for demonstration
         except Exception:
             self.logger.info("No previous trials found. Starting fresh.")
             return None
@@ -67,7 +65,7 @@ class HyperparamTracker:
     def _save_trials(self):
         try:
             with open("trials.json", "w") as f:
-                json.dump({}, f)  # Replace with actual serialization if you want to persist Trials
+                json.dump({}, f)  # Replace with proper serialization if needed
             self.logger.info("Saved trials to disk.")
         except Exception as e:
             self.logger.error("Error saving trials: %s", e)
@@ -81,7 +79,6 @@ class HyperparamTracker:
         for i in range(1, 6):
             model_name = f"{self.model_registry_name_prefix}_Model_{i}"
             try:
-                # Load the Production stage model from the MLflow registry
                 model_uri = f"models:/{model_name}/Production"
                 model = mlflow.pyfunc.load_model(model_uri)
                 models[f"Model_{i}"] = model
@@ -115,75 +112,48 @@ class HyperparamTracker:
         """
         self.logger.info("Notification sent: %s", message)
 
-    def adjust_search_space(self, history):
+    @staticmethod
+    def adjust_search_space(history, model_name):
         """
-        Dynamically adjust the hyperparameter search space based on historical run data.
-        (Stub implementation)
+        Dynamically adjust the hyperparameter search space based on the model type.
         """
-        self.logger.info("Adjusting search space based on history; current implementation is a stub.")
-        return {
-            'learning_rate': hp.uniform('learning_rate', 0.001, 0.1),
-            'max_depth': hp.choice('max_depth', [3, 5, 7, 9]),
-            'n_estimators': hp.quniform('n_estimators', 50, 300, 1),
-            'subsample': hp.uniform('subsample', 0.5, 1.0),
-            'colsample_bytree': hp.uniform('colsample_bytree', 0.5, 1.0),
-        }
-
-    def approve_suggested_hyperparameters(self, model_name, hyperparameters, approval):
-        """
-        Evaluate suggested hyperparams, compare performance to best historical metrics.
-        """
-        history = self.fetch_hyperparameter_history(model_name)
-        if history:
-            best_entry = history[-1]
-            best_hyperparams = best_entry["hyperparameters"]
-            best_metrics = best_entry["metrics"]
+        if model_name == "HomeownerLossModel_Model_1":
+            return {
+                'booster': 'gbtree',
+                'n_estimators': hp.choice('n_estimators', [40, 100]),
+                'learning_rate': hp.choice('learning_rate', [0.10, 0.20]),
+                'max_depth': hp.choice('max_depth', [2, 3, 4]),
+                'colsample_bytree': hp.choice('colsample_bytree', [0.80, 0.85]),
+                'subsample': hp.choice('subsample', [0.70, 0.80, 0.90]),
+                'base_score': 100,
+                'reg_alpha': 17,
+                'gamma': 0,
+                'monotone_constraints': [tuple(np.tile([1, 1, -1], 16))]
+            }
         else:
-            best_hyperparams = None
-            best_metrics = {"test_rmse": float("inf")}
-
-        with mlflow.start_run() as run:
-            mlflow.set_tag("model_name", model_name)
-            mlflow.log_param("data_version", self.data_version)
-
-            # Model_1 uses original (unbalanced), others use balanced
-            if model_name == "HomeownerLossModel_Model_1":
-                X_train_used, Y_train_used = self.X_train, self.Y_train
-            else:
-                X_train_used, Y_train_used = self.X_train_balanced, self.Y_train_balanced
-
-            metrics = evaluate_model(
-                self.models[model_name],
-                X_train_used,
-                Y_train_used,
-                self.X_test,
-                self.Y_test
-            )
-            mlflow.log_metrics(metrics)
-
-        if metrics["test_rmse"] > best_metrics.get("test_rmse", float("inf")):
-            self.logger.info(
-                "New hyperparameters performed worse than previous best. Rolling back to %s.",
-                best_hyperparams
-            )
-            self.send_notification(f"Model {model_name}: new hyperparams not approved (RMSE higher).")
-            return best_hyperparams
-
-        if approval:
-            self.logger.info("Approved new hyperparameters for %s: %s", model_name, hyperparameters)
-            self.send_notification(f"Model {model_name}: new hyperparameters approved.")
-            return hyperparameters
-        else:
-            self.logger.warning("Rejected hyperparameters for %s.", model_name)
-            self.send_notification(f"Model {model_name}: hyperparameter suggestion rejected.")
-            return None
+            # For Models 2-5: create a monotone string from a monotone_list.
+            monotone_list = [1] * 30  # Adjust this list length as needed.
+            monotone_str = "(" + ",".join(str(c) for c in monotone_list) + ")"
+            return {
+                'booster': 'gbtree',
+                'n_estimators': hp.choice('n_estimators', [150, 400, 420]),
+                'max_depth': hp.choice('max_depth', [8, 10, 12]),
+                'learning_rate': hp.choice('learning_rate', [0.01, 0.015]),
+                'subsample': hp.choice('subsample', [0.7, 0.75, 0.8]),
+                'colsample_bytree': hp.choice('colsample_bytree', [0.85, 0.9]),
+                'reg_alpha': hp.choice('reg_alpha', [0.01, 0.05, 0.1, 1.0]),
+                'reg_lambda': hp.choice('reg_lambda', [0.005, 0.01]),
+                'min_child_weight': hp.choice('min_child_weight', [1, 2, 3, 4]),
+                'gamma': hp.choice('gamma', [0.2, 0.25]),
+                'monotone_constraints': [monotone_str]
+            }
 
     @staticmethod
     def _tune_model(model_name, model,
                     X_train, Y_train, X_train_balanced, Y_train_balanced,
                     X_test, Y_test, max_evals, early_stop_rounds, base_trials):
         """
-        Perform hyperparameter tuning using Hyperopt + Bayesian optimization.
+        Perform hyperparameter tuning using Hyperopt with Bayesian optimization.
         """
         import logging
         logger = logging.getLogger(f"Tuning_{model_name}")
@@ -194,7 +164,7 @@ class HyperparamTracker:
             logger.setLevel(logging.INFO)
 
         def objective(params):
-            # Model_1 uses unbalanced, everything else uses balanced
+            # Choose training data based on model type
             if model_name == "HomeownerLossModel_Model_1":
                 X_train_used, Y_train_used = X_train, Y_train
             else:
@@ -203,17 +173,22 @@ class HyperparamTracker:
             try:
                 with mlflow.start_run(nested=True):
                     mlflow.log_params(params)
-                    # Evaluate
-                    metrics = evaluate_model(model, X_train_used, Y_train_used, X_test, Y_test)
-                    mlflow.log_metrics(metrics)
+                    metrics = evaluate_model(
+                        model,
+                        X_train_used,
+                        Y_train_used,
+                        X_test,
+                        Y_test,
+                        model_name=model_name,
+                        summary_only=True
+                    )
                 loss = metrics["test_rmse"]
             except Exception as e:
                 logger.error("Exception during trial: %s", e)
                 loss = float("inf")
             return {"loss": loss, "status": STATUS_OK}
 
-        search_space = HyperparamTracker.adjust_search_space(None)
-
+        search_space = HyperparamTracker.adjust_search_space(None, model_name)
         trials = base_trials
         best_loss = float("inf")
         best_params = None
@@ -244,15 +219,14 @@ class HyperparamTracker:
                 logger.info("Early stopping triggered after %d evaluations.", i + 1)
                 break
 
-        # Convert n_estimators to int if it exists
-        if 'n_estimators' in best_params:
+        if best_params and 'n_estimators' in best_params:
             best_params['n_estimators'] = int(best_params['n_estimators'])
 
         return best_params, best_loss
 
     def tune_all_models(self, max_evals=50, early_stop_rounds=10):
         """
-        Tuning each model. Logs best hyperparams and loss to MLflow.
+        Tune each model and log the best hyperparameters and loss to MLflow.
         """
         models_to_tune = [
             "HomeownerLossModel_Model_1",
@@ -278,8 +252,7 @@ class HyperparamTracker:
                     early_stop_rounds,
                     self.trials
                 ): model_name
-                for model_name in models_to_tune
-                if model_name in self.models
+                for model_name in models_to_tune if model_name in self.models
             }
             for future in as_completed(futures):
                 model_name = futures[future]
@@ -292,15 +265,11 @@ class HyperparamTracker:
                         mlflow.log_metric("test_rmse", best_loss)
                     self.logger.info("Best hyperparameters for %s: %s (loss=%.4f)", model_name, best_params, best_loss)
                     results[model_name] = best_params
-                    self.send_notification(
-                        f"New best hyperparameters for {model_name}: {best_params}, loss: {best_loss}"
-                    )
+                    self.send_notification(f"New best hyperparameters for {model_name}: {best_params}, loss: {best_loss}")
                 except Exception as exc:
                     self.logger.error("Model %s generated an exception: %s", model_name, exc)
 
-        # Optionally, save Trials
         self._save_trials()
 
-        # Print final results
         for model_name, params in results.items():
             print(f"Best hyperparameters for {model_name}: {params}")
