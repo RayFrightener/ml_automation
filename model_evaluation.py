@@ -24,7 +24,7 @@ def evaluate_model(
     y_train,
     X_test,
     y_test,
-    log_to_mlflow=False,
+    log_to_mlflow=True,
     return_predictions=False
 ):
     """
@@ -110,9 +110,9 @@ def evaluate_model(
 def plot_predictions(
     y_true,
     y_pred,
-    title="Predictions vs Actual",
+    title="Actual vs. Predict",
     plot_type="scatter",
-    log_to_mlflow=False,
+    log_to_mlflow=True,
     filename="predictions_plot.png"
 ):
     """
