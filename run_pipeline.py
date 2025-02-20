@@ -15,20 +15,17 @@ from model_evaluation import plot_predictions
 import argparse
 
 def main():
-    # Example S3 URI for demonstration; in practice, these should be actual S3 paths.
-    s3_uri = "s3://grangeprojectbucket/ut_loss_history_1.csv"
+    local_csv_path = "data/ut_loss_history_1.csv"
     
-    # Initialize MLflow experiment (set an experiment name)
     mlflow.set_experiment("HomeownerLossHistoryPrediction")
     
-    # Instantiate the HyperparamTracker with the same URI for train/test for demo purposes.
     tracker = HyperparamTracker(
-        s3_uri_X_train=s3_uri,
-        s3_uri_Y_train=s3_uri,
-        s3_uri_X_train_balanced=s3_uri,
-        s3_uri_Y_train_balanced=s3_uri,
-        s3_uri_X_test=s3_uri,
-        s3_uri_Y_test=s3_uri,
+        s3_uri_X_train=local_csv_path,
+        s3_uri_Y_train=local_csv_path,
+        s3_uri_X_train_balanced=local_csv_path,
+        s3_uri_Y_train_balanced=local_csv_path,
+        s3_uri_X_test=local_csv_path,
+        s3_uri_Y_test=local_csv_path,
         data_version="v1.0",
         model_registry_name_prefix="HomeownerLossModel"
     )
