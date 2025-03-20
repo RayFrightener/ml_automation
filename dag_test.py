@@ -37,7 +37,7 @@ import xgboost as xgb
 
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python_operator import PythonOperator
+from airflow.operators.python import PythonOperator
 
 from hyperparameter_tracker import HyperparamTracker
 from model_evaluation import evaluate_model, plot_predictions
@@ -46,7 +46,7 @@ from model_evaluation import evaluate_model, plot_predictions
 import boto3
 import mlflow
 import mlflow.xgboost
-import great_expectations as ge
+#import great_expectations as ge
 
 # Hyperopt for Bayesian hyperparameter search
 from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
@@ -436,7 +436,7 @@ def archive_data(**context):
 with DAG(
     dag_id="homeowner_loss_history_dag_extended",
     default_args=default_args,
-    schedule_interval="@hourly",
+    schedule="*/15 * * * *",
     catchup=False
 ) as dag:
 
