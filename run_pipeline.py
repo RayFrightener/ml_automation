@@ -15,7 +15,7 @@ from model_evaluation import plot_predictions
 import argparse
 
 def main():
-    local_csv_path = "data/ut_loss_history_1.csv"
+    local_csv_path = "ut_loss_history_1.csv"
     
     mlflow.set_experiment("HomeownerLossHistoryPrediction")
     
