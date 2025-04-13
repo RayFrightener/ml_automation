@@ -19,7 +19,7 @@ import boto3
 import mlflow
 import mlflow.xgboost
 # Uncomment the following if Great Expectations is configured
-# import great_expectations as ge
+import great_expectations as ge
 
 from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 from sklearn.model_selection import train_test_split
@@ -85,19 +85,26 @@ def homeowner_loss_history_dag_extended():
 
     @task
     def validate_data_with_ge():
-        """Validate data with Great Expectations using a checkpoint."""
+        """
+        Runs Great Expectations checkpoint validation on the raw data.
+        Assumes that great_expectations.yml is in the working directory or GE_HOME is set.
+        """
         try:
-            # Get checkpoint name from Airflow Variable
-            checkpoint_name = Variable.get("GE_CHECKPOINT", default_var="my_checkpoint")
-            # Uncomment and adjust if GE is configured:
-            # ge_context = ge.get_context()
-            # batch = ge_context.sources.pandas_default.read_csv(LOCAL_DATA_PATH)
-            # results = ge_context.run_checkpoint(checkpoint_name=checkpoint_name)
-            # if not results["success"]:
-            #     raise ValueError("Great Expectations validation failed!")
-            logging.info(f"Data validated with Great Expectations checkpoint: {checkpoint_name}")
+            # Hard-coded checkpoint name for quick use; you can change this if needed.
+            checkpoint_name = "my_checkpoint"
+
+            # Load GE context - ensures it reads great_expectations.yml from your GE project folder
+            ge_context = ge.get_context()
+
+            # Option 1: Trigger the checkpoint directly (if your project defines one)
+            results = ge_context.run_checkpoint(checkpoint_name=checkpoint_name)
+            
+            if not results.get("success", False):
+                raise ValueError("Great Expectations validation failed!")
+            
+            logging.info("Data validated successfully with GE checkpoint '%s'. Results: %s", checkpoint_name, results)
         except Exception as e:
-            logging.error(f"Error in validate_data_with_ge: {e}")
+            logging.error("Error in validate_data_with_ge: %s", e)
             raise
 
     @task
