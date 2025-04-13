@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 import logging
+import warnings
+
+# Suppress specific deprecation warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message="datetime.datetime.utcnow()")
 
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
@@ -56,7 +61,7 @@ default_args = {
 # Create a global boto3 S3 client for reuse
 s3_client = boto3.client("s3")
 
-@dag(default_args=default_args, schedule_interval="*/15 * * * *", catchup=False, tags=["homeowner", "loss_history"])
+@dag(default_args=default_args, schedule="*/15 * * * *", catchup=False, tags=["homeowner", "loss_history"])
 def homeowner_loss_history_dag_extended():
     """
     Homeowner Loss History Prediction DAG.
