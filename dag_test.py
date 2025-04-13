@@ -10,10 +10,11 @@ import pandas as pd
 import xgboost as xgb
 import logging
 import warnings
+import pkg_resources
 
 # Suppress specific deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
-warnings.filterwarnings("ignore", category=DeprecationWarning, message="datetime.datetime.utcnow()")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message="datetime.datetime.now()")
 
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
