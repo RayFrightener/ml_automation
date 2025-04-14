@@ -16,15 +16,16 @@ PREFIXES = {
 # Basic logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# Create a global S3 client to avoid recreating it in every function.
+# Create a global S3 client so that it isn’t recreated in every function.
 s3 = boto3.client('s3')
+
 
 def list_prefix_objects(bucket_name, prefix, retries=3, delay=2):
     """
     Lists the objects under a given S3 prefix with retries.
     
     Args:
-        bucket_name (str): Hard-coded bucket name.
+        bucket_name (str): The S3 bucket name.
         prefix (str): The S3 prefix to list.
         retries (int): Number of retry attempts.
         delay (int): Delay in seconds between retries.
@@ -44,14 +45,15 @@ def list_prefix_objects(bucket_name, prefix, retries=3, delay=2):
             time.sleep(delay)
     return None
 
+
 def create_s3_prefix_if_not_exists(bucket_name, prefix, retries=3, delay=2):
     """
-    Checks if a given S3 prefix exists. If not, it creates a zero-byte object
-    to mimic the folder, with retries.
+    Checks if a given S3 prefix exists in the bucket. If it does not, creates a zero-byte object
+    to mimic the folder. Includes retry logic.
     
     Args:
-        bucket_name (str): Hard-coded bucket name.
-        prefix (str): Hard-coded S3 prefix.
+        bucket_name (str): The S3 bucket name.
+        prefix (str): The S3 prefix to check/create.
         retries (int): Number of retry attempts.
         delay (int): Delay in seconds between retries.
     """
@@ -72,35 +74,48 @@ def create_s3_prefix_if_not_exists(bucket_name, prefix, retries=3, delay=2):
             time.sleep(delay)
     raise Exception(f"Failed to create or verify S3 prefix '{prefix}' in bucket '{bucket_name}' after {retries} attempts.")
 
+
 def verify_prefixes(bucket_name, prefixes):
     """
-    Verifies that the given prefixes exist in the bucket by listing their contents.
+    Verifies that the specified prefixes exist in the bucket by listing their contents.
     
     Args:
-        bucket_name (str): Hard-coded bucket name.
+        bucket_name (str): The S3 bucket name.
         prefixes (dict): A dictionary of prefix names to S3 prefixes.
     """
     logging.info("Verifying prefixes in bucket '%s'...", bucket_name)
+    all_verified = True
     for key, prefix in prefixes.items():
         response = list_prefix_objects(bucket_name, prefix)
         if response is None or 'Contents' not in response:
-            logging.error("Prefix '%s' (%s) not found or empty.", key, prefix)
+            logging.error("Prefix '%s' (%s) not found or is empty.", key, prefix)
+            all_verified = False
         else:
             logging.info("Prefix '%s' (%s) verification successful. Contents: %s", key, prefix, response.get("Contents"))
-    logging.info("Prefix verification complete for all defined keys.")
+    if all_verified:
+        logging.info("All defined prefixes verified successfully.")
+    else:
+        logging.error("Some prefixes were not verified. Please check the errors above.")
+
 
 def setup_ge_s3():
     """
     Sets up the required S3 folder structure for Great Expectations.
-    Uses hard-coded bucket and folder structure and verifies that each prefix exists.
+    Hard-coded to use the bucket "grange-seniordesign-bucket" and create/verify
+    the following prefixes:
+      - great_expectations/expectations
+      - great_expectations/validations
+      - great_expectations/checkpoints
+      - great_expectations/data_docs
     """
     for key, prefix in PREFIXES.items():
-        logging.info("Ensuring S3 prefix exists for %s: %s", key, prefix)
+        logging.info("Ensuring S3 prefix exists for '%s': %s", key, prefix)
         create_s3_prefix_if_not_exists(BUCKET_NAME, prefix)
     
     logging.info("All prefixes ensured. Now verifying prefixes...")
     verify_prefixes(BUCKET_NAME, PREFIXES)
     logging.info("S3 setup for Great Expectations completed successfully.")
+
 
 if __name__ == "__main__":
     setup_ge_s3()
