@@ -16,6 +16,9 @@ PREFIXES = {
 # Basic logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+# Create a global S3 client to avoid recreating it in every function.
+s3 = boto3.client('s3')
+
 def list_prefix_objects(bucket_name, prefix, retries=3, delay=2):
     """
     Lists the objects under a given S3 prefix with retries.
@@ -29,7 +32,6 @@ def list_prefix_objects(bucket_name, prefix, retries=3, delay=2):
     Returns:
         dict: The S3 list_objects_v2 response or None if it fails.
     """
-    s3 = boto3.client('s3')
     attempt = 0
     while attempt < retries:
         try:
@@ -53,7 +55,6 @@ def create_s3_prefix_if_not_exists(bucket_name, prefix, retries=3, delay=2):
         retries (int): Number of retry attempts.
         delay (int): Delay in seconds between retries.
     """
-    s3 = boto3.client('s3')
     attempt = 0
     while attempt < retries:
         try:
@@ -86,6 +87,7 @@ def verify_prefixes(bucket_name, prefixes):
             logging.error("Prefix '%s' (%s) not found or empty.", key, prefix)
         else:
             logging.info("Prefix '%s' (%s) verification successful. Contents: %s", key, prefix, response.get("Contents"))
+    logging.info("Prefix verification complete for all defined keys.")
 
 def setup_ge_s3():
     """
