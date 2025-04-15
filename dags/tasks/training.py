@@ -42,7 +42,6 @@ MONO_MAP = Variable.get("MONOTONIC_CONSTRAINTS_MAP", deserialize_json=True)
 
 s3_client = boto3.client("s3")
 
-
 def manual_override():
     """
     Returns manually overridden hyperparameters from Airflow Variables if present.
@@ -57,15 +56,14 @@ def manual_override():
         logging.error(f"Error fetching manual override: {e}")
     return None
 
-
 def train_xgboost_hyperopt(processed_path, override_params=None):
     """
     Trains an XGBoost model with hyperparameter tuning via Hyperopt.
-    
+
     Args:
         processed_path (str): CSV file path to the preprocessed data.
         override_params (dict): Manually supplied hyperparameters (if any).
-        
+
     Returns:
         float: The final RMSE computed on the test set.
     """
@@ -74,16 +72,21 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
         mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
         df = pd.read_csv(processed_path)
+
         if "pure_premium" not in df.columns:
-            raise ValueError("Target column 'pure_premium' missing from the data.")
+            if 'il_total' in df.columns and 'eey' in df.columns:
+                df['pure_premium'] = df['il_total'] / df['eey']
+                df['sample_weight'] = df['eey']
+                logging.info("Computed 'pure_premium' and 'sample_weight' from il_total and eey.")
+            else:
+                raise ValueError("Required columns 'pure_premium' or raw 'il_total' and 'eey' not found.")
+
         y = df["pure_premium"]
         X = df.drop(columns=["pure_premium"])
 
-        # Fetch monotonic constraints based on MODEL_ID
         constraints = MONO_MAP.get(MODEL_ID, "(1,1,1,1)")
         constraint_list = constraints.strip("()").split(",")
         if len(constraint_list) != X.shape[1]:
-            # Adjust constraints to match the number of features
             constraints = "(" + ",".join(["1"] * X.shape[1]) + ")"
             MONO_MAP[MODEL_ID] = constraints
             Variable.set("MONOTONIC_CONSTRAINTS_MAP", json.dumps(MONO_MAP))
@@ -91,7 +94,6 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        # Define hyperparameter search space
         space = {
             "learning_rate": hp.uniform("learning_rate", 0.001, 0.3),
             "max_depth": hp.choice("max_depth", [3, 5, 7, 9, 11]),
@@ -139,7 +141,6 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
             mlflow.log_metric("rmse", final_rmse)
             mlflow.xgboost.log_model(final_model, artifact_path="model")
 
-        # Save model locally and then upload it to S3
         model_path = f"/tmp/xgb_{MODEL_ID}_model.json"
         final_model.save_model(model_path)
         s3_key = f"{S3_MODELS_FOLDER}/xgb_{MODEL_ID}_model.json"
@@ -152,7 +153,6 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
         logging.error(f"Error in train_xgboost_hyperopt: {e}")
         raise
 
-
 def compare_and_update_registry():
     """
     Placeholder for comparing the newly trained model against the production model.
@@ -163,9 +163,8 @@ def compare_and_update_registry():
     return
 
 if __name__ == "__main__":
-    # For testing purposes only
     sample_csv = "/tmp/sample_processed.csv"
     if not os.path.exists(sample_csv):
-        pd.DataFrame({"pure_premium": [100, 200, 150], "feature1": [1,2,3]}).to_csv(sample_csv, index=False)
+        pd.DataFrame({"il_total": [100, 200, 150], "eey": [1, 2, 1], "feature1": [1, 2, 3]}).to_csv(sample_csv, index=False)
     rmse = train_xgboost_hyperopt(sample_csv, manual_override())
     print(f"Final RMSE: {rmse}")
