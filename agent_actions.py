@@ -27,6 +27,7 @@ import os
 import json
 import requests
 import logging
+import pandas as pd
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
@@ -36,6 +37,7 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 AIRFLOW_API_URL = os.getenv("AIRFLOW_API_URL", "http://3.146.46.179:8081")
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "utoledo")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "power2do")
+# OPENAI_API_KEY can be used in a separate part of your integration when needed.
 
 ###############################################
 # Slack notification function
@@ -142,12 +144,12 @@ def generate_root_cause_report(dag_id, execution_date):
     Returns:
         dict: A report detailing the likely root cause.
     """
-    # Placeholder logic: In production you could parse logs or query metrics.
+    # Placeholder logic: In production you would parse logs or query metrics.
     report = {
         "dag_id": dag_id,
         "execution_date": execution_date,
         "root_cause": "Data drift in feature 'example_feature' and increased RMSE.",
-        "details": "Detected a 15% drift in 'example_feature' and RMSE increased by 0.5 units compared to the previous best."
+        "details": "Detected a 15% drift in 'example_feature' and RMSE increased by 0.5 units compared to previous best."
     }
     logging.info(f"Root Cause Report: {report}")
     return report
@@ -166,7 +168,7 @@ def suggest_hyperparam_improvement(model_id, current_rmse, previous_best_rmse):
     """
     suggestion = {
         "model_id": model_id,
-        "suggestion": "Increase 'n_estimators' and decrease 'learning_rate'",
+        "suggestion": "Increase 'n_estimators' and decrease 'learning_rate'.",
         "current_rmse": current_rmse,
         "previous_best_rmse": previous_best_rmse,
         "confidence": 0.8
@@ -184,7 +186,6 @@ def validate_data_integrity(dataset_path):
     Returns:
         dict: A validation report.
     """
-    # Placeholder: In production, add schema checking, missing value analysis etc.
     report = {
         "dataset_path": dataset_path,
         "valid": True,
@@ -219,6 +220,74 @@ def describe_fix_plan(issue_type, solution_summary):
     }
     logging.info(f"Fix Plan Description: {plan}")
     return plan
+
+def fetch_airflow_logs(dag_id, run_id):
+    """
+    Retrieve logs for a given Airflow DAG run. This function is a placeholder—
+    in production, it would fetch logs from S3 or a log management system.
+    
+    Args:
+        dag_id (str): The DAG ID.
+        run_id (str): The run ID or execution date for the DAG run.
+    
+    Returns:
+        dict: A simulated log output.
+    """
+    # Placeholder logic; replace with real log fetching if needed.
+    logs = f"Simulated logs for DAG {dag_id} and run {run_id}."
+    logging.info(logs)
+    return {"logs": logs}
+
+def update_airflow_variable(key, value):
+    """
+    Update an Airflow Variable via the Airflow REST API.
+    
+    Args:
+        key (str): Variable name.
+        value (str): New value to set.
+    
+    Returns:
+        dict: API response summary.
+    """
+    # This is a placeholder implementation.
+    # In production, you'd call the Airflow API endpoint /api/v1/variables/{variable_key}.
+    logging.info(f"Updating Airflow Variable {key} to {value}")
+    # For this example, we simply return a success message.
+    return {"status": "success", "variable": key, "new_value": value}
+
+def list_recent_failures(lookback_hours):
+    """
+    List DAG or task failures from the last N hours. This is a placeholder; in production,
+    you would query Airflow's metadata database or log store.
+    
+    Args:
+        lookback_hours (number): The number of hours to look back.
+    
+    Returns:
+        dict: A simulated list of recent failures.
+    """
+    failures = [
+        {"dag_id": "homeowner_dag", "task_id": "train_xgboost_hyperopt", "failure_time": "2025-04-14T05:00:00Z"}
+    ]
+    logging.info(f"Recent failures from the past {lookback_hours} hours: {failures}")
+    return {"failures": failures}
+
+def escalate_issue(issue_summary, contact_method, severity):
+    """
+    Escalate an issue to human operators via the designated channel.
+    
+    Args:
+        issue_summary (str): Brief summary of the issue.
+        contact_method (str): Method of escalation (e.g., "slack", "email", "pagerduty").
+        severity (str): Severity level ("CRITICAL", "HIGH", "MEDIUM", "LOW").
+    
+    Returns:
+        dict: Escalation confirmation.
+    """
+    escalation_message = f"Escalation [{severity}]: {issue_summary} via {contact_method}."
+    logging.info(escalation_message)
+    # In production, send this message via the chosen method.
+    return {"status": "escalated", "message": escalation_message}
 
 ###############################################
 # Function to handle tool calls from the OpenAI Assistant
@@ -286,42 +355,47 @@ def handle_function_call(tool_call):
                 issue_type=arguments["issue_type"],
                 solution_summary=arguments["solution_summary"]
             )
+        elif func_name == "fetch_airflow_logs":
+            return fetch_airflow_logs(
+                dag_id=arguments["dag_id"],
+                run_id=arguments["run_id"]
+            )
+        elif func_name == "update_airflow_variable":
+            return update_airflow_variable(
+                key=arguments["key"],
+                value=arguments["value"]
+            )
+        elif func_name == "list_recent_failures":
+            return list_recent_failures(
+                lookback_hours=arguments["lookback_hours"]
+            )
+        elif func_name == "escalate_issue":
+            return escalate_issue(
+                issue_summary=arguments["issue_summary"],
+                contact_method=arguments["contact_method"],
+                severity=arguments["severity"]
+            )
         else:
             raise ValueError(f"Function {func_name} not recognized.")
     except Exception as ex:
         logging.error(f"Error handling function call: {ex}")
         return {"error": str(ex)}
 
+"""
 # For testing purposes: Uncomment the following block to simulate a tool call.
 if __name__ == "__main__":
-     # Test notify_slack
-     test_tool_call = {
-         "function": {
-             "name": "notify_slack",
-             "arguments": json.dumps({
-                 "channel": "#alerts",
-                 "title": "🚨 Test Alert",
-                 "details": "This is a test notification.",
-                 "urgency": "high"
-             })
-         }
-     }
-     result = handle_function_call(test_tool_call)
-     print("Test Result:", result)
-
-# For testing purposes: Uncomment the following block to simulate a tool call.
-# if __name__ == "__main__":
-#     # Test notify_slack
-#     test_tool_call = {
-#         "function": {
-#             "name": "notify_slack",
-#             "arguments": json.dumps({
-#                 "channel": "#alerts",
-#                 "title": "🚨 Test Alert",
-#                 "details": "This is a test notification.",
-#                 "urgency": "high"
-#             })
-#         }
-#     }
-#     result = handle_function_call(test_tool_call)
-#     print("Test Result:", result)
+    # Test notify_slack
+    test_tool_call = {
+        "function": {
+            "name": "notify_slack",
+            "arguments": json.dumps({
+                "channel": "#alerts",
+                "title": "🚨 Test Alert",
+                "details": "This is a test notification from the assistant.",
+                "urgency": "high"
+            })
+        }
+    }
+    result = handle_function_call(test_tool_call)
+    print("Test Result:", result)
+"""

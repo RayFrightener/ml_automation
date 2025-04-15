@@ -25,6 +25,7 @@ from airflow.operators.empty import EmptyOperator
 import boto3
 import mlflow
 import mlflow.xgboost
+from dags.tasks.cache import is_cache_valid, update_cache
 # GE is commented out for now to isolate issues
 # import great_expectations as ge
 
@@ -84,9 +85,11 @@ def homeowner_dag():
         """Download CSV data from S3 to a local path."""
         try:
             s3_key = f"{S3_DATA_FOLDER}/ut_loss_history_1.csv"
-            logging.info(f"Downloading s3://{S3_BUCKET}/{s3_key} to {LOCAL_DATA_PATH}")
-            s3_client.download_file(S3_BUCKET, s3_key, LOCAL_DATA_PATH)
-            logging.info("Data ingestion complete.")
+            if not is_cache_valid(S3_BUCKET, s3_key, LOCAL_DATA_PATH):
+                update_cache(S3_BUCKET, s3_key, LOCAL_DATA_PATH)
+                logging.info(f"Downloaded and cached: {s3_key}")
+            else:
+                logging.info(f"Cache hit. Skipping download for: {s3_key}")
         except Exception as e:
             logging.error(f"Error in ingest_data_from_s3: {e}")
             raise
