@@ -28,6 +28,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 import boto3
+from agent_actions import handle_function_call
+from datetime import datetime
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -82,17 +84,24 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
                 raise ValueError("Required columns 'pure_premium' or raw 'il_total' and 'eey' not found.")
 
         y = df["pure_premium"]
-        X = df.drop(columns=["pure_premium"])
+        sample_weight = df.get("sample_weight")
+        X = df.drop(columns=["pure_premium", "sample_weight"] if "sample_weight" in df else ["pure_premium"])
 
-        constraints = MONO_MAP.get(MODEL_ID, "(1,1,1,1)")
-        constraint_list = constraints.strip("()").split(",")
-        if len(constraint_list) != X.shape[1]:
-            constraints = "(" + ",".join(["1"] * X.shape[1]) + ")"
+        constraints = MONO_MAP.get(MODEL_ID)
+        if not isinstance(constraints, list):
+            raise ValueError(f"Monotonic constraints for model '{MODEL_ID}' must be a list.")
+
+        if len(constraints) != X.shape[1]:
+            logging.warning(f"Constraint length mismatch. Adjusting to match {X.shape[1]} features.")
+            constraints = [1] * X.shape[1]
             MONO_MAP[MODEL_ID] = constraints
             Variable.set("MONOTONIC_CONSTRAINTS_MAP", json.dumps(MONO_MAP))
-            logging.warning(f"Adjusted monotonic constraints to match {X.shape[1]} features.")
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        constraints = tuple(constraints)  # XGBoost expects tuple
+
+        X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
+            X, y, sample_weight, test_size=0.2, random_state=42
+        )
 
         space = {
             "learning_rate": hp.uniform("learning_rate", 0.001, 0.3),
@@ -112,9 +121,9 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
                 eval_metric="rmse",
                 **params
             )
-            model.fit(X_train, y_train, verbose=False)
+            model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
             preds = model.predict(X_test)
-            rmse = mean_squared_error(y_test, preds) ** 0.5
+            rmse = mean_squared_error(y_test, preds, sample_weight=w_test) ** 0.5
             return {"loss": rmse, "status": STATUS_OK}
 
         if override_params:
@@ -133,18 +142,39 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
             eval_metric="rmse",
             **best
         )
-        final_model.fit(X_train, y_train)
-        final_rmse = mean_squared_error(y_test, final_model.predict(X_test)) ** 0.5
+        final_model.fit(X_train, y_train, sample_weight=w_train)
+        final_rmse = mean_squared_error(y_test, final_model.predict(X_test), sample_weight=w_test) ** 0.5
 
-        with mlflow.start_run(run_name=f"xgboost_{MODEL_ID}_hyperopt"):
+        with mlflow.start_run(run_name=f"xgboost_{MODEL_ID}_hyperopt") as run:
             mlflow.log_params(best)
             mlflow.log_metric("rmse", final_rmse)
             mlflow.xgboost.log_model(final_model, artifact_path="model")
 
-        model_path = f"/tmp/xgb_{MODEL_ID}_model.json"
+            # agent post-training summary
+            try:
+                handle_function_call({
+                    "function": {
+                        "name": "notify_slack",
+                        "arguments": json.dumps({
+                            "channel": "#agent_logs",
+                            "title": f"📈 Training Summary ({MODEL_ID})",
+                            "details": f"RMSE: {final_rmse:.2f}, Params: {json.dumps(best)}",
+                            "urgency": "low"
+                        })
+                    }
+                })
+            except Exception as agent_err:
+                logging.warning(f"Agent post-training log failed: {agent_err}")
+
+        # Save and upload versioned model
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        model_filename = f"xgb_{MODEL_ID}_model_{timestamp}.json"
+        model_path = f"/tmp/{model_filename}"
+        s3_key = f"{S3_MODELS_FOLDER}/{model_filename}"
+
         final_model.save_model(model_path)
-        s3_key = f"{S3_MODELS_FOLDER}/xgb_{MODEL_ID}_model.json"
         s3_client.upload_file(model_path, S3_BUCKET, s3_key)
+
         logging.info(f"Training complete. RMSE: {final_rmse:.4f}. Model saved at s3://{S3_BUCKET}/{s3_key}")
 
         return final_rmse
