@@ -2,75 +2,93 @@
 """
 training.py
 
-This module defines functions for training the XGBoost model using hyperparameter tuning.
-It logs experiments via MLflow and saves the final model to S3.
+Handles:
+  - Checking for manual override.
+  - Hyperparameter tuning via Hyperopt.
+  - Model training using XGBoost.
+  - Logging metrics and parameters to MLflow.
+  - Saving the trained model locally and uploading it to S3.
+  - (Placeholder) Comparing and updating the model registry.
+
+Requires:
+  - MLflow tracking URI.
+  - S3_BUCKET and S3_MODELS_FOLDER.
+  - MONOTONIC_CONSTRAINTS_MAP provided as an Airflow Variable (retrieved as MONO_MAP).
 """
 
 import os
 import json
 import logging
-import time
 import pandas as pd
-import numpy as np
 import xgboost as xgb
 import mlflow
 import mlflow.xgboost
-from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
+from airflow.models import Variable
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
-from airflow.models import Variable
+from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 import boto3
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# Configuration: read from environment or Airflow Variables
-S3_BUCKET = os.getenv("S3_BUCKET") or Variable.get("S3_BUCKET", default_var="grange-seniordesign-bucket")
-S3_MODELS_FOLDER = "models"
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI") or Variable.get("MLFLOW_TRACKING_URI", default_var="http://3.146.46.179:5000")
+# Configuration parameters
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", Variable.get("MLFLOW_TRACKING_URI", default_var="http://3.146.46.179:5000"))
 MLFLOW_EXPERIMENT_NAME = Variable.get("MLFLOW_EXPERIMENT_NAME", default_var="Homeowner_Loss_Hist_Proj")
-MODEL_ID = (os.getenv("MODEL_ID") or Variable.get("MODEL_ID", default_var="model1")).lower().strip()
-MONOTONIC_CONSTRAINTS_MAP = Variable.get(
-    "MONOTONIC_CONSTRAINTS_MAP",
-    default_var='{"model1": "(1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1)", "model2": "(1,1,1,1,1,1,1,1,1,1,1,1,1,1)", "model3": "(1,1,1,1,1,1,1,1,1,1,1,1,1,1)", "model4": "(1,1,1,1,1,1,1,1,1,1,1,1,1,1)", "model5": "(1,1,1,1,1,1,1,1,1,1,1,1,1,1)"}',
-    deserialize_json=True)
-LOCAL_PROCESSED_PATH = "/tmp/homeowner_processed.csv"
+S3_BUCKET = os.getenv("S3_BUCKET") or Variable.get("S3_BUCKET")
+S3_MODELS_FOLDER = "models"
+MODEL_ID = os.getenv("MODEL_ID", Variable.get("MODEL_ID", default_var="model1")).strip().lower()
+MONO_MAP = Variable.get("MONOTONIC_CONSTRAINTS_MAP", deserialize_json=True)
 
-# Create global S3 client
 s3_client = boto3.client("s3")
 
 
-def train_xgboost_hyperopt(processed_path: str, override_params):
+def manual_override():
     """
-    Trains an XGBoost model with hyperparameter tuning using Hyperopt.
-    Logs parameters and metrics using MLflow and saves the final model to S3.
+    Returns manually overridden hyperparameters from Airflow Variables if present.
+    """
+    try:
+        override = Variable.get("MANUAL_OVERRIDE", default_var="False")
+        if override.lower() == "true":
+            custom_params = json.loads(Variable.get("CUSTOM_HYPERPARAMS", default_var="{}"))
+            logging.info("Manual override activated; using custom hyperparameters.")
+            return custom_params
+    except Exception as e:
+        logging.error(f"Error fetching manual override: {e}")
+    return None
+
+
+def train_xgboost_hyperopt(processed_path, override_params=None):
+    """
+    Trains an XGBoost model with hyperparameter tuning via Hyperopt.
     
     Args:
-        processed_path (str): Path to the preprocessed CSV file.
-        override_params (dict or None): Optional manually provided hyperparameters.
+        processed_path (str): CSV file path to the preprocessed data.
+        override_params (dict): Manually supplied hyperparameters (if any).
+        
+    Returns:
+        float: The final RMSE computed on the test set.
     """
     try:
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
         mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-        constraints = MONOTONIC_CONSTRAINTS_MAP.get(MODEL_ID, "(1,1,1,1)")
+
         df = pd.read_csv(processed_path)
-        target_col = "pure_premium"
-        if target_col not in df.columns:
-            raise ValueError(f"Target column '{target_col}' not found in processed data.")
-        y = df[target_col]
-        X = df.drop(columns=[target_col])
-        
-        # Validate monotonic constraints: adjust if feature count mismatches
-        feature_count = X.shape[1]
-        con_list = constraints.strip("()").split(",")
-        if len(con_list) != feature_count:
-            logging.warning(f"Constraints count ({len(con_list)}) does not match feature count ({feature_count}). Adjusting...")
-            constraints = "(" + ",".join(["1"] * feature_count) + ")"
-            logging.info(f"Adjusted constraints: {constraints}")
-            updated_map = MONOTONIC_CONSTRAINTS_MAP.copy()
-            updated_map[MODEL_ID] = constraints
-            Variable.set("MONOTONIC_CONSTRAINTS_MAP", json.dumps(updated_map))
-        
+        if "pure_premium" not in df.columns:
+            raise ValueError("Target column 'pure_premium' missing from the data.")
+        y = df["pure_premium"]
+        X = df.drop(columns=["pure_premium"])
+
+        # Fetch monotonic constraints based on MODEL_ID
+        constraints = MONO_MAP.get(MODEL_ID, "(1,1,1,1)")
+        constraint_list = constraints.strip("()").split(",")
+        if len(constraint_list) != X.shape[1]:
+            # Adjust constraints to match the number of features
+            constraints = "(" + ",".join(["1"] * X.shape[1]) + ")"
+            MONO_MAP[MODEL_ID] = constraints
+            Variable.set("MONOTONIC_CONSTRAINTS_MAP", json.dumps(MONO_MAP))
+            logging.warning(f"Adjusted monotonic constraints to match {X.shape[1]} features.")
+
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
         # Define hyperparameter search space
@@ -99,7 +117,7 @@ def train_xgboost_hyperopt(processed_path: str, override_params):
 
         if override_params:
             best = override_params
-            logging.info("Using manually overridden hyperparameters.")
+            logging.info("Using manually provided hyperparameters.")
         else:
             trials = Trials()
             best = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=20, trials=trials)
@@ -114,20 +132,22 @@ def train_xgboost_hyperopt(processed_path: str, override_params):
             **best
         )
         final_model.fit(X_train, y_train)
-        rmse = mean_squared_error(y_test, final_model.predict(X_test)) ** 0.5
+        final_rmse = mean_squared_error(y_test, final_model.predict(X_test)) ** 0.5
 
-        # Log the experiment using MLflow
         with mlflow.start_run(run_name=f"xgboost_{MODEL_ID}_hyperopt"):
             mlflow.log_params(best)
-            mlflow.log_metric("rmse", rmse)
+            mlflow.log_metric("rmse", final_rmse)
             mlflow.xgboost.log_model(final_model, artifact_path="model")
 
-        # Save the model locally and upload to S3
-        local_model_path = f"/tmp/xgb_{MODEL_ID}_model.json"
-        final_model.save_model(local_model_path)
-        s3_model_key = f"{S3_MODELS_FOLDER}/xgb_{MODEL_ID}_model.json"
-        s3_client.upload_file(local_model_path, S3_BUCKET, s3_model_key)
-        logging.info(f"Training complete. RMSE={rmse:.4f}. Model stored at s3://{S3_BUCKET}/{s3_model_key}")
+        # Save model locally and then upload it to S3
+        model_path = f"/tmp/xgb_{MODEL_ID}_model.json"
+        final_model.save_model(model_path)
+        s3_key = f"{S3_MODELS_FOLDER}/xgb_{MODEL_ID}_model.json"
+        s3_client.upload_file(model_path, S3_BUCKET, s3_key)
+        logging.info(f"Training complete. RMSE: {final_rmse:.4f}. Model saved at s3://{S3_BUCKET}/{s3_key}")
+
+        return final_rmse
+
     except Exception as e:
         logging.error(f"Error in train_xgboost_hyperopt: {e}")
         raise
@@ -135,15 +155,17 @@ def train_xgboost_hyperopt(processed_path: str, override_params):
 
 def compare_and_update_registry():
     """
-    Placeholder for comparing the new model with the existing production model.
-    If the new model improves performance, update the registry.
+    Placeholder for comparing the newly trained model against the production model.
+    In production, this could use the MLflow Model Registry API to promote a model if it
+    outperforms the current version.
     """
-    logging.info("Comparing new model with production model (placeholder logic).")
-    return {"status": "success"}
-
+    logging.info("Comparing new model with production model... (placeholder)")
+    return
 
 if __name__ == "__main__":
-    # For testing purposes, call the training function.
-    test_processed_path = LOCAL_PROCESSED_PATH  # Ensure the processed CSV exists for testing.
-    test_override_params = None  # Or provide a dict of manual parameters if desired.
-    train_xgboost_hyperopt(test_processed_path, test_override_params)
+    # For testing purposes only
+    sample_csv = "/tmp/sample_processed.csv"
+    if not os.path.exists(sample_csv):
+        pd.DataFrame({"pure_premium": [100, 200, 150], "feature1": [1,2,3]}).to_csv(sample_csv, index=False)
+    rmse = train_xgboost_hyperopt(sample_csv, manual_override())
+    print(f"Final RMSE: {rmse}")

@@ -2,116 +2,114 @@
 """
 drift.py
 
-This module defines functions for detecting data drift and triggering self-healing.
-It compares current processed data against a reference means file (generated earlier)
-and determines if corrective actions (self-healing) are needed.
+Handles:
+  - Generation of reference means from the processed data.
+  - Data drift detection by comparing current data with reference means.
+  - A self-healing routine (simulated) when drift is detected.
+
+Requires:
+  - S3_BUCKET and REFERENCE_MEANS_PATH configuration.
+  - boto3 for S3 operations.
 """
 
 import os
-import json
-import time
 import logging
 import pandas as pd
 import numpy as np
-import boto3
+import time
 from airflow.models import Variable
-from dags.tasks.cache import is_cache_valid, update_cache
+import boto3
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# Configuration: read from environment or Airflow Variables
-S3_BUCKET = os.getenv("S3_BUCKET") or Variable.get("S3_BUCKET", default_var="grange-seniordesign-bucket")
-REFERENCE_MEANS_PATH = "/tmp/reference_means.csv"  # Local copy of the reference means
+# Configuration
+S3_BUCKET = os.environ.get("S3_BUCKET", Variable.get("S3_BUCKET", default_var="grange-seniordesign-bucket"))
+REFERENCE_MEANS_PATH = "/tmp/reference_means.csv"  # Local path to store generated reference means
 s3_client = boto3.client("s3")
 
-def detect_data_drift(processed_path: str):
+def generate_reference_means(processed_path, local_ref=REFERENCE_MEANS_PATH):
     """
-    Compare current data means with those from the reference means file.
-    Returns "self_healing" if significant drift is detected (>10%), else "train_xgboost_hyperopt".
-    
+    Generates a reference means CSV file from the processed data and uploads it to S3.
+
     Args:
-        processed_path (str): Path to the processed CSV file.
-        
+        processed_path (str): Path to the processed CSV.
+        local_ref (str): Local path to save the reference means CSV.
+
     Returns:
-        str: "self_healing" if drift is detected; otherwise, "train_xgboost_hyperopt".
+        str: Local path to the generated reference means CSV.
     """
     try:
-        df_current = pd.read_csv(processed_path)
-        
-        # Check if we need to download the reference means file from S3
+        df = pd.read_csv(processed_path)
+        # Calculate means for all numeric columns
+        means = df.select_dtypes(include=[np.number]).mean().reset_index()
+        means.columns = ["column_name", "mean_value"]
+        means.to_csv(local_ref, index=False)
         s3_key = "reference/reference_means.csv"
-        if not is_cache_valid(S3_BUCKET, s3_key, REFERENCE_MEANS_PATH):
-            update_cache(S3_BUCKET, s3_key, REFERENCE_MEANS_PATH)
-            logging.info(f"Downloaded and cached reference means: {s3_key}")
-        else:
-            logging.info(f"Cache hit. Using cached reference means file.")
-            
-        if not os.path.exists(REFERENCE_MEANS_PATH):
-            logging.warning(f"Reference means file not found at {REFERENCE_MEANS_PATH}. Skipping drift check.")
-            return "train_xgboost_hyperopt"
-            
-        df_reference = pd.read_csv(REFERENCE_MEANS_PATH)
-        reference_dict = {row["column_name"]: row["mean_value"] for _, row in df_reference.iterrows()}
+        s3_client.upload_file(local_ref, S3_BUCKET, s3_key)
+        logging.info(f"Generated and uploaded reference means to s3://{S3_BUCKET}/{s3_key}")
+        return local_ref
+    except Exception as e:
+        logging.error(f"Error generating reference means: {e}")
+        raise
+
+def detect_data_drift(current_data_path, reference_means_path, threshold=0.1):
+    """
+    Detects data drift by comparing current data’s mean values against the reference means.
+
+    Args:
+        current_data_path (str): Path to the current processed data CSV.
+        reference_means_path (str): Path to the reference means CSV.
+        threshold (float): Proportional drift threshold (default 0.1 for 10%).
+
+    Returns:
+        str: "self_healing" if drift is detected; "train_xgboost_hyperopt" otherwise.
+    """
+    try:
+        df_current = pd.read_csv(current_data_path)
+        df_ref = pd.read_csv(reference_means_path)
+        ref_dict = {row["column_name"]: row["mean_value"] for _, row in df_ref.iterrows()}
         drift_detected = False
         for col in df_current.select_dtypes(include=[np.number]).columns:
-            if col in reference_dict:
+            if col in ref_dict:
                 current_mean = df_current[col].mean()
-                ref_mean = reference_dict[col]
-                if ref_mean > 0:
-                    drift_ratio = abs(current_mean - ref_mean) / ref_mean
-                    if drift_ratio > 0.10:
+                ref_mean = ref_dict[col]
+                if ref_mean != 0:
+                    drift_ratio = abs(current_mean - ref_mean) / abs(ref_mean)
+                    if drift_ratio > threshold:
                         drift_detected = True
-                        logging.error(f"Data drift detected in '{col}': current mean={current_mean:.2f}, ref mean={ref_mean:.2f}, drift ratio={drift_ratio:.2%}")
+                        logging.error(f"Drift detected in {col}: current={current_mean:.2f}, ref={ref_mean:.2f}, ratio={drift_ratio:.2%}")
                 else:
-                    logging.warning(f"Non-positive reference mean for '{col}'; skipping drift check.")
+                    logging.warning(f"Reference mean for {col} is 0; skipping drift check.")
             else:
-                logging.warning(f"No reference value for '{col}'; skipping drift check.")
+                logging.warning(f"No reference for column {col}; skipping.")
         return "self_healing" if drift_detected else "train_xgboost_hyperopt"
     except Exception as e:
         logging.error(f"Error in detect_data_drift: {e}")
         raise
 
-
 def self_healing():
     """
-    Simulated self-healing branch that waits for a manual override.
-    In a production system, this might trigger further actions such as re-ingesting data
-    or retraining the model.
+    Simulates a self-healing routine when data drift is detected.
+    In a production environment, this could trigger revalidation or data cleanup routines.
     
     Returns:
-        str: A status message indicating that the override has been applied.
+        str: A message indicating that self-healing (and manual override) is complete.
     """
     try:
-        logging.info("Data drift detected. Executing self-healing routine and awaiting manual override...")
-        time.sleep(5)  # Simulate waiting time for manual intervention
-        logging.info("Manual override processed; proceeding with fix application.")
+        logging.info("Drift detected. Initiating self-healing routine; awaiting manual override...")
+        time.sleep(5)  # Simulate wait period for human intervention
+        logging.info("Self-healing routine completed; manual override confirmed.")
         return "override_done"
     except Exception as e:
         logging.error(f"Error in self_healing: {e}")
         raise
 
-
-def list_recent_failures(lookback_hours):
-    """
-    List recent DAG or task failures from the past N hours.
-    (Placeholder: In production, query Airflow’s metadata database or log storage.)
-    
-    Args:
-        lookback_hours (int): Number of hours to look back.
-        
-    Returns:
-        list: A list of failure dictionaries.
-    """
-    failures = [
-        {"dag_id": "homeowner_dag", "task_id": "train_xgboost_hyperopt", "failure_time": "2025-04-14T05:00:00Z"}
-    ]
-    logging.info(f"Recent failures in the past {lookback_hours} hours: {failures}")
-    return failures
-
-
 if __name__ == "__main__":
-    # For testing the drift detection:
-    test_processed_path = "/tmp/homeowner_processed.csv"  # Ensure this file exists for testing.
-    result = detect_data_drift(test_processed_path)
-    print("Drift detection result:", result)
+    # For testing purposes only
+    test_processed_path = "/tmp/sample_processed.csv"
+    if not os.path.exists(test_processed_path):
+        pd.DataFrame({"pure_premium": [100, 200, 150], "feature1": [1, 2, 3]}).to_csv(test_processed_path, index=False)
+    ref_path = generate_reference_means(test_processed_path)
+    drift_status = detect_data_drift(test_processed_path, ref_path)
+    print("Drift detection result:", drift_status)
