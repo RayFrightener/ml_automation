@@ -29,7 +29,7 @@ from airflow.operators.python import BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.models import Variable
 
-from tasks.ingestion import download_csv_from_s3, validate_data_with_ge
+from tasks.ingestion import ingest_data_from_s3
 from tasks.preprocessing import (
     load_data_to_dataframe,
     handle_missing_data,
@@ -76,7 +76,6 @@ def homeowner_dag():
         s3_key = "raw-data/ut_loss_history_1.csv"
         if not is_cache_valid(S3_BUCKET, s3_key, LOCAL_DATA_PATH):
             update_cache(S3_BUCKET, s3_key, LOCAL_DATA_PATH)
-        validate_data_with_ge(local_csv=LOCAL_DATA_PATH, checkpoint_name="homeowner_checkpoint")
         return LOCAL_DATA_PATH
 
     @task
@@ -87,6 +86,15 @@ def homeowner_dag():
         for col in df.select_dtypes(include=["number"]):
             df = cap_outliers(df, col)
         df = encode_categoricals(df)
+        
+        # Compute target and weight columns
+        if 'il_total' in df.columns and 'eey' in df.columns:
+            df['pure_premium'] = df['il_total'] / df['eey']
+            df['sample_weight'] = df['eey']
+            logging.info("Added 'pure_premium' and 'sample_weight' columns.")
+        else:
+            raise ValueError("Missing required columns 'il_total' or 'eey' to compute target.")
+        
         generate_profile_report(df)
         df.to_csv(LOCAL_PROCESSED_PATH, index=False)
         return LOCAL_PROCESSED_PATH
