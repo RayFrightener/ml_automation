@@ -69,7 +69,7 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
         constraints = tuple(constraints)
 
         X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
-            X, y, sample_weight, test_size=0.2, random_state=42
+            X, y, sample_weight, test_size=0.3, random_state=42
         )
 
         space = {
@@ -85,7 +85,7 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
         def objective(params):
             params["n_estimators"] = int(params["n_estimators"])
             model = xgb.XGBRegressor(
-                tree_method="gpu_hist",
+                tree_method="hist",
                 monotone_constraints=constraints,
                 use_label_encoder=False,
                 eval_metric="rmse",
