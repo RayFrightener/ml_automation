@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
 """
-homeowner_dag.py
+DAG.py 
 
 This is the main Airflow DAG script for the Homeowner Loss History Prediction project.
-It integrates tasks from the following modules in the tasks package:
-  - ingestion.py          (data ingestion tasks)
-  - preprocessing.py      (preprocessing and feature engineering tasks)
-  - drift.py              (drift detection and self-healing tasks)
-  - training.py           (model training and registry update tasks)
-  - notifications.py      (Slack notifications, log pushing, archiving tasks)
-  - cache.py              (caching / file-change checking functions)
-  - monitoring.py         (system metrics recording functions)
-  - agent_actions.py      (external agent logging/interactions)
-
-Ensure that your tasks package is properly structured and that necessary environment
-variables (or Airflow Variables) are set for S3, Slack, MLflow, and other services.
 """
 
 import os
 import time
 import json
 import logging
-import warnings
 from datetime import datetime, timedelta
 
 from airflow.decorators import dag, task
@@ -43,7 +30,7 @@ from tasks.training import manual_override, train_xgboost_hyperopt, compare_and_
 from tasks.notifications import send_to_slack, push_logs_to_s3, archive_data
 from tasks.cache import is_cache_valid, update_cache
 from tasks.monitoring import record_system_metrics
-from dags.agent_actions import handle_function_call
+from agent_actions import handle_function_call
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
@@ -51,7 +38,6 @@ S3_BUCKET = os.environ.get("S3_BUCKET", Variable.get("S3_BUCKET", default_var="g
 LOCAL_DATA_PATH = "/tmp/homeowner_data.csv"
 LOCAL_PROCESSED_PATH = "/tmp/homeowner_processed.csv"
 REFERENCE_MEANS_PATH = "/tmp/reference_means.csv"
-MODEL_ID = os.environ.get("MODEL_ID", Variable.get("MODEL_ID", default_var="model1")).lower().strip()
 
 default_args = {
     "owner": "airflow",
@@ -86,15 +72,11 @@ def homeowner_dag():
         for col in df.select_dtypes(include=["number"]):
             df = cap_outliers(df, col)
         df = encode_categoricals(df)
-        
-        # Compute target and weight columns
         if 'il_total' in df.columns and 'eey' in df.columns:
             df['pure_premium'] = df['il_total'] / df['eey']
             df['sample_weight'] = df['eey']
-            logging.info("Added 'pure_premium' and 'sample_weight' columns.")
         else:
-            raise ValueError("Missing required columns 'il_total' or 'eey' to compute target.")
-        
+            raise ValueError("Missing required columns 'il_total' or 'eey'")
         generate_profile_report(df)
         df.to_csv(LOCAL_PROCESSED_PATH, index=False)
         return LOCAL_PROCESSED_PATH
@@ -122,6 +104,14 @@ def homeowner_dag():
         })
         time.sleep(5)
         return "override_done"
+
+    @task(task_id="train_xgboost_hyperopt__task")
+    def run_training(path: str):
+        return train_xgboost_hyperopt(path, manual_override())
+
+    @task(task_id="compare_and_update_registry__task")
+    def run_compare_and_update():
+        return compare_and_update_registry()
 
     @task
     def record_metrics():
@@ -154,28 +144,32 @@ def homeowner_dag():
                 os.remove(path)
         return "archived"
 
-    ingestion_path = ingest_and_validate()
-    processed_file = preprocess_data(ingestion_path)
-    drift_result = check_for_drift(processed_file)
+    # --- define dependencies and flow ---
+    ingestion_path  = ingest_and_validate()
+    processed_file  = preprocess_data(ingestion_path)
+    drift_result    = check_for_drift(processed_file)
 
-    healing = perform_self_healing()
-    training = train_xgboost_hyperopt(LOCAL_PROCESSED_PATH, manual_override())
-    metrics = record_metrics()
-    notification = log_and_notify()
-    archiving = archive_outputs()
+    healing         = perform_self_healing()
+    training        = run_training(processed_file)
+    update_registry = run_compare_and_update()
+    metrics         = record_metrics()
+    notification    = log_and_notify()
+    archiving       = archive_outputs()
 
     branch = BranchPythonOperator(
         task_id="branch_decision",
-        python_callable=lambda result: "perform_self_healing__task" if result == "self_healing" else "train_xgboost_hyperopt__task",
-        op_args=[drift_result]
+        python_callable=lambda result: 
+            "perform_self_healing__task" if result == "self_healing" 
+            else "train_xgboost_hyperopt__task",
+        op_args=[drift_result],
     )
 
     join = EmptyOperator(task_id="join_branches", trigger_rule="one_success")
-    update = compare_and_update_registry()
 
+    # wiring
     ingestion_path >> processed_file >> drift_result >> branch
     branch >> healing >> join
     branch >> training >> join
-    join >> update >> metrics >> notification >> archiving
+    join >> update_registry >> metrics >> notification >> archiving
 
 dag = homeowner_dag()
