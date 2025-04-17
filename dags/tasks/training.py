@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""
-training.py
-
-Handles:
-  - Checking for manual override.
-  - Hyperparameter tuning via Hyperopt.
-  - Model training using XGBoost.
-  - Logging metrics and parameters to MLflow.
-  - Saving the trained model locally and uploading it to S3.
-  - (Placeholder) Comparing and updating the model registry.
-
-Requires:
-  - MLflow tracking URI.
-  - S3_BUCKET and S3_MODELS_FOLDER.
-  - MONOTONIC_CONSTRAINTS_MAP provided as an Airflow Variable (retrieved as MONO_MAP).
-"""
-
 import os
 import json
 import logging
@@ -45,9 +27,6 @@ MONO_MAP = Variable.get("MONOTONIC_CONSTRAINTS_MAP", deserialize_json=True)
 s3_client = boto3.client("s3")
 
 def manual_override():
-    """
-    Returns manually overridden hyperparameters from Airflow Variables if present.
-    """
     try:
         override = Variable.get("MANUAL_OVERRIDE", default_var="False")
         if override.lower() == "true":
@@ -59,16 +38,6 @@ def manual_override():
     return None
 
 def train_xgboost_hyperopt(processed_path, override_params=None):
-    """
-    Trains an XGBoost model with hyperparameter tuning via Hyperopt.
-
-    Args:
-        processed_path (str): CSV file path to the preprocessed data.
-        override_params (dict): Manually supplied hyperparameters (if any).
-
-    Returns:
-        float: The final RMSE computed on the test set.
-    """
     try:
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
         mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
@@ -97,7 +66,7 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
             MONO_MAP[MODEL_ID] = constraints
             Variable.set("MONOTONIC_CONSTRAINTS_MAP", json.dumps(MONO_MAP))
 
-        constraints = tuple(constraints)  # XGBoost expects tuple
+        constraints = tuple(constraints)
 
         X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
             X, y, sample_weight, test_size=0.2, random_state=42
@@ -116,12 +85,20 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
         def objective(params):
             params["n_estimators"] = int(params["n_estimators"])
             model = xgb.XGBRegressor(
+                tree_method="gpu_hist",
                 monotone_constraints=constraints,
                 use_label_encoder=False,
                 eval_metric="rmse",
                 **params
             )
-            model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+            model.fit(
+                X_train, y_train,
+                sample_weight=w_train,
+                eval_set=[(X_test, y_test)],
+                sample_weight_eval_set=[w_test],
+                early_stopping_rounds=20,
+                verbose=True
+            )
             preds = model.predict(X_test)
             rmse = mean_squared_error(y_test, preds, sample_weight=w_test) ** 0.5
             return {"loss": rmse, "status": STATUS_OK}
@@ -137,12 +114,21 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
             logging.info(f"Best tuned hyperparameters: {best}")
 
         final_model = xgb.XGBRegressor(
+            tree_method="gpu_hist",
             monotone_constraints=constraints,
             use_label_encoder=False,
             eval_metric="rmse",
             **best
         )
-        final_model.fit(X_train, y_train, sample_weight=w_train)
+        final_model.fit(
+            X_train, y_train,
+            sample_weight=w_train,
+            eval_set=[(X_test, y_test)],
+            sample_weight_eval_set=[w_test],
+            early_stopping_rounds=20,
+            verbose=True
+        )
+
         final_rmse = mean_squared_error(y_test, final_model.predict(X_test), sample_weight=w_test) ** 0.5
 
         with mlflow.start_run(run_name=f"xgboost_{MODEL_ID}_hyperopt") as run:
@@ -150,7 +136,6 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
             mlflow.log_metric("rmse", final_rmse)
             mlflow.xgboost.log_model(final_model, artifact_path="model")
 
-            # agent post-training summary
             try:
                 handle_function_call({
                     "function": {
@@ -166,7 +151,6 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
             except Exception as agent_err:
                 logging.warning(f"Agent post-training log failed: {agent_err}")
 
-        # Save and upload versioned model
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         model_filename = f"xgb_{MODEL_ID}_model_{timestamp}.json"
         model_path = f"/tmp/{model_filename}"
@@ -184,11 +168,6 @@ def train_xgboost_hyperopt(processed_path, override_params=None):
         raise
 
 def compare_and_update_registry():
-    """
-    Placeholder for comparing the newly trained model against the production model.
-    In production, this could use the MLflow Model Registry API to promote a model if it
-    outperforms the current version.
-    """
     logging.info("Comparing new model with production model... (placeholder)")
     return
 
