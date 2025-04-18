@@ -45,7 +45,7 @@ def generate_reference_means(
     Returns:
         The local path to the generated reference means CSV.
     """
-    df = pd.read_csv(processed_path)
+    df = pd.read_parquet(processed_path)
     means = (
         df.select_dtypes(include=[np.number])
           .mean()
@@ -77,7 +77,7 @@ def detect_data_drift(
     Returns:
         "self_healing" if drift detected, else "train_xgboost_hyperopt".
     """
-    df_current = pd.read_csv(current_data_path)
+    df_current = pd.read_parquet(current_data_path)
     df_ref     = pd.read_csv(reference_means_path)
     ref_map    = dict(zip(df_ref["column_name"], df_ref["mean_value"]))
 

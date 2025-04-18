@@ -10,7 +10,7 @@ Handles:
   - Generating pure_premium & sample_weight
   - Pandera schema validation (after pure_premium exists)
   - Selecting the correct loss-history features per MODEL_ID
-  - Data profiling report + Slack notification
+  - Data profiling report + Slack notification via agent_actions
 """
 
 import os
@@ -141,7 +141,7 @@ def select_model_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def generate_profile_report(df: pd.DataFrame, output_path: str = PROFILE_REPORT_PATH) -> None:
     """
-    Generate a minimal profiling report, write to HTML, and notify Slack.
+    Generate a minimal profiling report, write to HTML, and notify via agent_actions.
     """
     profile = ProfileReport(df, title="Homeowner Data Profile", minimal=True)
     profile.to_file(output_path)
@@ -150,7 +150,7 @@ def generate_profile_report(df: pd.DataFrame, output_path: str = PROFILE_REPORT_
     try:
         handle_function_call({
             "function": {
-                "name": "notify_success",
+                "name": "send_to_slack",
                 "arguments": json.dumps({
                     "channel": "#agent_logs",
                     "title": "📊 Profiling Summary",

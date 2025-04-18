@@ -1,171 +1,132 @@
 #!/usr/bin/env python3
 """
-homeowner_dag.py
-
-This is the main Airflow DAG for the Homeowner Loss History Prediction project.
-It ingests raw data, validates and preprocesses it, snapshots schema, detects drift,
-and then either self‐heals or trains all five models in parallel before registering results.
+Home‑owner Loss‑History full pipeline DAG
+• calls the unified train_and_compare_fn (RMSE + SHAP + auto‑promotion)
+• keeps branch‑logic / drift‑check exactly as before
 """
 
-import os
-import time
-import logging
-import pandas as pd
+import os, logging, time
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
-from airflow.operators.python import BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
+from airflow.operators.python import PythonOperator
+from airflow.utils.trigger_rule import TriggerRule
 
 from tasks.ingestion import ingest_data_from_s3
 from tasks.preprocessing import preprocess_data
 from tasks.schema_validation import validate_schema, snapshot_schema
-from tasks.drift import generate_reference_means, detect_data_drift, self_healing
-from tasks.training import train_xgboost_hyperopt, manual_override, compare_and_update_registry
+from tasks.drift import (
+    generate_reference_means,
+    detect_data_drift,
+    self_healing as drift_self_heal,
+)
 from tasks.monitoring import record_system_metrics
+from tasks.training import train_and_compare_fn, manual_override
 from utils.slack import post as send_message
 from utils.storage import upload as upload_to_s3
 
-# Basic logging
+# ─── Config ────────────────────────────────────────────────────────────────
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# Constants
-LOCAL_PROCESSED_PATH = "/tmp/homeowner_processed.csv"
+LOCAL_PROCESSED_PATH = "/tmp/homeowner_processed.parquet"
 REFERENCE_MEANS_PATH = "/tmp/reference_means.csv"
 MODEL_IDS = ["model1", "model2", "model3", "model4", "model5"]
 
-default_args = {
-    "owner": "airflow",
-    "depends_on_past": False,
-    "start_date": datetime(2025, 1, 1),
-    "email_on_failure": False,
-    "email_on_retry": False,
-    "retries": 1,
-    "retry_delay": timedelta(minutes=5),
-}
+def _default_args():
+    return dict(
+        owner="airflow",
+        depends_on_past=False,
+        start_date=datetime(2025, 1, 1),
+        email_on_failure=False,
+        email_on_retry=False,
+        retries=1,
+        retry_delay=timedelta(minutes=10),
+        execution_timeout=timedelta(hours=2),
+    )
 
 @dag(
     dag_id="homeowner_loss_history_full_pipeline",
-    default_args=default_args,
-    schedule_interval="0 10 * * *",  # run daily at 10am
+    default_args=_default_args(),
+    schedule_interval="0 10 * * *",  # 10 AM daily
     catchup=False,
     tags=["homeowner", "loss_history"],
 )
 def homeowner_pipeline():
+    # 1️⃣ Ingest raw CSV
+    raw_path = ingest_data_from_s3()
 
+    # 2️⃣ Preprocess → parquet
     @task()
-    def ingest_task() -> str:
-        """Download raw CSV (with caching) and return local file path."""
-        return ingest_data_from_s3()
-
-    @task()
-    def preprocess_and_save(raw_path: str) -> str:
-        """Preprocess, validate schema, snapshot schema, and save processed CSV."""
-        df = preprocess_data(raw_path)
+    def _preprocess(path: str) -> str:
+        df = preprocess_data(path)
         validate_schema(df)
         snapshot_schema(df)
         df.to_parquet(LOCAL_PROCESSED_PATH, index=False)
-        log.info(f"Wrote processed data to {LOCAL_PROCESSED_PATH}")
         return LOCAL_PROCESSED_PATH
+    processed_path = _preprocess(raw_path)
 
-    @task()
-    def check_for_drift(processed_path: str) -> str:
-        """
-        If reference means exist, detect drift.
-        Returns 'self_healing' or 'train_models'.
-        """
-        if not os.path.exists(REFERENCE_MEANS_PATH):
-            log.warning("No reference means; skipping drift detection.")
-            return "train_models"
-        ref = generate_reference_means(processed_path, REFERENCE_MEANS_PATH)
-        return detect_data_drift(processed_path, ref)
+    # 3️⃣ Drift‑check branch
+    @task.branch()
+    def _branch(path: str) -> str:
+        if os.path.exists(REFERENCE_MEANS_PATH):
+            ref = generate_reference_means(path, REFERENCE_MEANS_PATH)
+            flag = detect_data_drift(path, ref)
+            return "healing_task" if flag == "self_healing" else "join_after_training"
+        return "join_after_training"
+    drift_decision = _branch(processed_path)
 
-    @task()
-    def healing_task() -> str:
-        """Notify Slack of drift and simulate self‑healing."""
+    # 3a Self‑healing
+    @task(task_id="healing_task")
+    def healing_task():
         send_message(
             channel="#alerts",
             title="⚠️ Drift Detected",
-            details="Data drift detected; self‑healing routine executed.",
-            urgency="medium"
+            details="Self‑healing routine executed.",
+            urgency="medium",
         )
-        time.sleep(5)
-        return "override_done"
+        drift_self_heal()
+    heal = healing_task()
+
+    # 4️⃣ Parallel training
+    join_after_training = EmptyOperator(
+        task_id="join_after_training",
+        trigger_rule=TriggerRule.NONE_FAILED,
+    )
+    for m in MODEL_IDS:
+        PythonOperator(
+            task_id=f"train_compare_{m}",
+            python_callable=train_and_compare_fn,
+            op_kwargs={"model_id": m, "processed_path": LOCAL_PROCESSED_PATH},
+        ).set_downstream(join_after_training)
+
+    drift_decision >> heal >> join_after_training
+    drift_decision >> join_after_training
+
+    # 5️⃣ Metrics, notify, archive
+    @task()
+    def record_metrics():
+        record_system_metrics(runtime=time.time())
 
     @task()
-    def train_model_task(processed_path: str, model_id: str) -> float:
-        """Train a single XGBoost model with Hyperopt and return test RMSE."""
-        return train_xgboost_hyperopt(
-            processed_path,
-            override_params=manual_override(),
-            model_id=model_id
-        )
-
-    @task()
-    def compare_task() -> str:
-        """Compare new models to production and update registry."""
-        compare_and_update_registry()
-        return "registry_updated"
-
-    @task()
-    def record_metrics_task() -> str:
-        """Record system metrics (runtime, memory) via monitoring utility."""
-        runtime = time.time()
-        memory = os.popen("free -m").read()
-        record_system_metrics(runtime=runtime, memory_usage=memory)
-        return "metrics_logged"
-
-    @task()
-    def notify_complete_task() -> str:
-        """Notify Slack that pipeline completed successfully."""
+    def notify_complete():
         send_message(
             channel="#alerts",
             title="✅ Pipeline Complete",
-            details="All models trained and artifacts archived.",
-            urgency="low"
+            details="Training + SHAP logging finished.",
+            urgency="low",
         )
-        return "notified"
 
     @task()
-    def archive_task() -> str:
-        """Upload logs and processed CSV to S3, then clean up."""
+    def archive():
         upload_to_s3("/home/airflow/logs/homeowner_dag.log", "logs/homeowner_dag.log")
-        upload_to_s3(LOCAL_PROCESSED_PATH, "archive/homeowner_processed.csv")
-        for p in [LOCAL_PROCESSED_PATH, REFERENCE_MEANS_PATH]:
-            if os.path.exists(p):
-                os.remove(p)
-        return "archived"
+        upload_to_s3(LOCAL_PROCESSED_PATH, "archive/homeowner_processed.parquet")
+        for f in (LOCAL_PROCESSED_PATH, REFERENCE_MEANS_PATH):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
-    # DAG flow
-    raw_path       = ingest_task()
-    processed_path = preprocess_and_save(raw_path)
-    drift_decision = check_for_drift(processed_path)
-
-    branch = BranchPythonOperator(
-        task_id="branch_on_drift",
-        python_callable=lambda decision: "healing_task" if decision == "self_healing" else "train_models",
-        op_args=[drift_decision],
-    )
-
-    heal = healing_task()
-
-    train_tasks = train_model_task.expand(
-        processed_path=[processed_path] * len(MODEL_IDS),
-        model_id=MODEL_IDS
-    )
-
-    join_models = EmptyOperator(task_id="join_models", trigger_rule="one_success")
-
-    compare   = compare_task()
-    record    = record_metrics_task()
-    notify    = notify_complete_task()
-    archive   = archive_task()
-
-    # wiring
-    raw_path >> processed_path >> drift_decision >> branch
-    branch >> heal >> join_models
-    branch >> train_tasks >> join_models
-
-    join_models >> compare >> record >> notify >> archive
+    join_after_training >> record_metrics() >> notify_complete() >> archive()
 
 dag = homeowner_pipeline()
