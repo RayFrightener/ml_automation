@@ -1,90 +1,73 @@
 #!/usr/bin/env python3
 """
-notifications.py
+tasks/notifications.py
 
-This module defines functions for:
-  - Sending Slack notifications using agent_actions.
-  - Uploading logs to S3.
-  - Archiving data to S3.
-
-Ensure the following environment variables are set via .env or Airflow Variables:
-  - SLACK_WEBHOOK_URL
-  - S3_BUCKET
-  - S3_ARCHIVE_FOLDER (optional, defaults to 'archive')
+Refactored to:
+  - Use utils/storage.upload instead of boto3.upload_file.
+  - Use utils/slack.post_message instead of agent_actions.send_to_slack.
+  - Wrap upload operations with tenacity retries.
 """
-
-from dotenv import load_dotenv
-load_dotenv()  # Assumes .env is in the project root
 
 import os
 import logging
-import boto3
+from dotenv import load_dotenv
 from airflow.models import Variable
-from dags.agent_actions import send_to_slack, escalate_issue
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+from ..utils.slack import post_message
+from ..utils.storage import upload
+from ..utils.config import S3_BUCKET, ARCHIVE_FOLDER as S3_ARCHIVE_FOLDER
+
+load_dotenv()  # Assumes .env is in the project root
 
 # Setup basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
 
-# Load configuration
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL") or Variable.get("SLACK_WEBHOOK_URL", default_var="")
-S3_BUCKET = os.getenv("S3_BUCKET") or Variable.get("S3_BUCKET", default_var="grange-seniordesign-bucket")
-S3_ARCHIVE_FOLDER = os.getenv("S3_ARCHIVE_FOLDER", "archive")
-
-# S3 client
-s3_client = boto3.client("s3")
-
-
-def push_logs_to_s3(log_file_path):
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def push_logs_to_s3(log_file_path: str) -> dict:
     """
-    Uploads a log file to the S3 bucket under 'logs/'.
+    Uploads a log file to S3 under 'logs/' using the storage wrapper.
 
     Args:
-        log_file_path (str): Local log file path
+        log_file_path: Local path to the log file.
 
     Returns:
-        dict: Status and S3 path
+        dict: Status and S3 path.
     """
-    try:
-        s3_key = f"logs/{os.path.basename(log_file_path)}"
-        s3_client.upload_file(log_file_path, S3_BUCKET, s3_key)
-        logging.info(f"Uploaded {log_file_path} to s3://{S3_BUCKET}/{s3_key}")
-        return {"status": "success", "s3_path": f"s3://{S3_BUCKET}/{s3_key}"}
-    except Exception as e:
-        logging.error(f"Failed to upload log: {e}")
-        return {"status": "error", "detail": str(e)}
+    key = f"logs/{os.path.basename(log_file_path)}"
+    upload(log_file_path, key, bucket=S3_BUCKET)
+    s3_path = f"s3://{S3_BUCKET}/{key}"
+    logging.info(f"Uploaded logs to {s3_path}")
+    return {"status": "success", "s3_path": s3_path}
 
-
-def archive_data(file_path):
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def archive_data(file_path: str) -> dict:
     """
-    Archives a data file to the 'archive/' folder in S3.
+    Archives a file to the configured archive folder in S3.
 
     Args:
-        file_path (str): Local file to upload
+        file_path: Local path to the file.
 
     Returns:
-        dict: Status and S3 archive path
+        dict: Status and S3 archive path.
     """
-    try:
-        s3_key = f"{S3_ARCHIVE_FOLDER}/{os.path.basename(file_path)}"
-        s3_client.upload_file(file_path, S3_BUCKET, s3_key)
-        logging.info(f"Archived file to s3://{S3_BUCKET}/{s3_key}")
-        return {"status": "success", "s3_path": f"s3://{S3_BUCKET}/{s3_key}"}
-    except Exception as e:
-        logging.error(f"Failed to archive file: {e}")
-        return {"status": "error", "detail": str(e)}
+    key = f"{S3_ARCHIVE_FOLDER}/{os.path.basename(file_path)}"
+    upload(file_path, key, bucket=S3_BUCKET)
+    s3_path = f"s3://{S3_BUCKET}/{key}"
+    logging.info(f"Archived data to {s3_path}")
+    return {"status": "success", "s3_path": s3_path}
 
-
-def notify_success(channel="#alerts"):
+def notify_success(channel: str = "#alerts") -> dict:
     """
-    Sends a simple success Slack notification.
+    Sends a simple success notification via Slack.
 
     Args:
-        channel (str): Slack channel
+        channel: Slack channel to post to.
 
     Returns:
-        dict: Slack API response
+        dict: Slack API response.
     """
-    return send_to_slack(
+    return post_message(
         channel=channel,
         title="✅ Pipeline Completed",
         details="The homeowner DAG ran successfully.",

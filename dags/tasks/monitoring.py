@@ -1,38 +1,75 @@
-# tasks/monitoring.py
-
+#!/usr/bin/env python3
 """
-monitoring.py
+tasks/monitoring.py
 
-This module provides utility functions to log basic system performance metrics
-during DAG runs, such as runtime and memory usage. Logs are stored via Airflow's logger.
-
-Dependencies:
-    - psutil (install with `pip install psutil`)
+Monitoring utilities with Prometheus instrumentation:
+  - Records DAG runtime
+  - Records memory metrics
+  - Exposes /metrics on port 8000
 """
 
 import logging
 import time
 import psutil
+from prometheus_client import start_http_server, Gauge
 
+# Start Prometheus metrics server
+start_http_server(8000)
 
-def record_system_metrics(runtime=None, memory_usage=None):
+# Define Prometheus gauges
+dag_runtime_gauge = Gauge(
+    "homeowner_dag_runtime_seconds",
+    "Duration of the DAG run in seconds"
+)
+memory_available_gauge = Gauge(
+    "homeowner_memory_available_mb",
+    "Available system memory in megabytes"
+)
+memory_used_gauge = Gauge(
+    "homeowner_memory_used_mb",
+    "Used system memory in megabytes"
+)
+memory_total_gauge = Gauge(
+    "homeowner_memory_total_mb",
+    "Total system memory in megabytes"
+)
+memory_percent_gauge = Gauge(
+    "homeowner_memory_usage_percent",
+    "Percentage of system memory in use"
+)
+
+def record_system_metrics(runtime: float = None, memory_usage: str = None) -> None:
     """
-    Record and log system metrics.
+    Record and export system metrics to Prometheus and log them.
 
     Args:
-        runtime (float, optional): A timestamp or runtime duration.
-        memory_usage (str, optional): A memory usage string (e.g., from `free -m`).
+        runtime (float, optional): The runtime duration in seconds.
+        memory_usage (str, optional): Ignored (string snapshots aren't Prometheus-friendly).
     """
-    if runtime:
-        logging.info(f"[System Monitoring] Runtime Timestamp: {runtime}")
+    # Record DAG runtime
+    if runtime is not None:
+        dag_runtime_gauge.set(runtime)
+        logging.info(f"[Monitoring] DAG runtime set to {runtime:.2f}s")
     else:
-        logging.info(f"[System Monitoring] Runtime: {time.time()}")
+        now = time.time()
+        dag_runtime_gauge.set(now)
+        logging.info(f"[Monitoring] DAG runtime timestamp set to {now:.2f}")
 
-    if memory_usage:
-        logging.info(f"[System Monitoring] Custom Memory Snapshot:\n{memory_usage}")
-    else:
-        virtual_mem = psutil.virtual_memory()
-        logging.info(f"[System Monitoring] Available RAM: {virtual_mem.available / (1024 * 1024):.2f} MB")
-        logging.info(f"[System Monitoring] Used RAM: {virtual_mem.used / (1024 * 1024):.2f} MB")
-        logging.info(f"[System Monitoring] Total RAM: {virtual_mem.total / (1024 * 1024):.2f} MB")
-        logging.info(f"[System Monitoring] RAM Usage Percentage: {virtual_mem.percent}%")
+    # Record memory stats
+    vm = psutil.virtual_memory()
+    avail_mb = vm.available / (1024 * 1024)
+    used_mb  = vm.used      / (1024 * 1024)
+    total_mb = vm.total     / (1024 * 1024)
+
+    memory_available_gauge.set(avail_mb)
+    memory_used_gauge.set(used_mb)
+    memory_total_gauge.set(total_mb)
+    memory_percent_gauge.set(vm.percent)
+
+    logging.info(
+        "[Monitoring] Memory — "
+        f"Avail: {avail_mb:.2f}MB, "
+        f"Used: {used_mb:.2f}MB, "
+        f"Total: {total_mb:.2f}MB, "
+        f"Usage: {vm.percent:.1f}%"
+    )

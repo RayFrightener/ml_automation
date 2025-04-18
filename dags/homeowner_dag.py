@@ -1,43 +1,38 @@
 #!/usr/bin/env python3
 """
-DAG.py 
+homeowner_dag.py
 
-This is the main Airflow DAG script for the Homeowner Loss History Prediction project.
+This is the main Airflow DAG for the Homeowner Loss History Prediction project.
+It ingests raw data, validates and preprocesses it, snapshots schema, detects drift,
+and then either self‐heals or trains all five models in parallel before registering results.
 """
 
 import os
 import time
-import json
 import logging
+import pandas as pd
 from datetime import datetime, timedelta
-
 from airflow.decorators import dag, task
 from airflow.operators.python import BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
-from airflow.models import Variable
 
 from tasks.ingestion import ingest_data_from_s3
-from tasks.preprocessing import (
-    load_data_to_dataframe,
-    handle_missing_data,
-    detect_outliers_iqr,
-    cap_outliers,
-    encode_categoricals,
-    generate_profile_report
-)
+from tasks.preprocessing import preprocess_data
+from tasks.schema_validation import validate_schema, snapshot_schema
 from tasks.drift import generate_reference_means, detect_data_drift, self_healing
-from tasks.training import manual_override, train_xgboost_hyperopt, compare_and_update_registry
-from tasks.notifications import send_to_slack, push_logs_to_s3, archive_data
-from tasks.cache import is_cache_valid, update_cache
+from tasks.training import train_xgboost_hyperopt, manual_override, compare_and_update_registry
 from tasks.monitoring import record_system_metrics
-from agent_actions import handle_function_call
+from utils.slack import send_message
+from utils.storage import upload as upload_to_s3
 
+# Basic logging
+log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-S3_BUCKET = os.environ.get("S3_BUCKET", Variable.get("S3_BUCKET", default_var="grange-seniordesign-bucket"))
-LOCAL_DATA_PATH = "/tmp/homeowner_data.csv"
+# Constants
 LOCAL_PROCESSED_PATH = "/tmp/homeowner_processed.csv"
 REFERENCE_MEANS_PATH = "/tmp/reference_means.csv"
+MODEL_IDS = ["model1", "model2", "model3", "model4", "model5"]
 
 default_args = {
     "owner": "airflow",
@@ -46,130 +41,131 @@ default_args = {
     "email_on_failure": False,
     "email_on_retry": False,
     "retries": 1,
-    "retry_delay": timedelta(minutes=1),
+    "retry_delay": timedelta(minutes=5),
 }
 
 @dag(
+    dag_id="homeowner_loss_history_full_pipeline",
     default_args=default_args,
-    schedule="0 3 * * *",
-    catchup=False,
-    tags=["homeowner", "loss_history"]
+    schedule_interval="0 10 * * *",  # run daily at 10am
+    catchup=True,
+    tags=["homeowner", "loss_history"],
 )
-def homeowner_dag():
+def homeowner_pipeline():
 
-    @task
-    def ingest_and_validate():
-        s3_key = "raw-data/ut_loss_history_1.csv"
-        if not is_cache_valid(S3_BUCKET, s3_key, LOCAL_DATA_PATH):
-            update_cache(S3_BUCKET, s3_key, LOCAL_DATA_PATH)
-        return LOCAL_DATA_PATH
+    @task()
+    def ingest_task() -> str:
+        """Download raw CSV (with caching) and return local file path."""
+        return ingest_data_from_s3()
 
-    @task
-    def preprocess_data(file_path: str):
-        df = load_data_to_dataframe(file_path)
-        df = handle_missing_data(df)
-        detect_outliers_iqr(df)
-        for col in df.select_dtypes(include=["number"]):
-            df = cap_outliers(df, col)
-        df = encode_categoricals(df)
-        if 'il_total' in df.columns and 'eey' in df.columns:
-            df['pure_premium'] = df['il_total'] / df['eey']
-            df['sample_weight'] = df['eey']
-        else:
-            raise ValueError("Missing required columns 'il_total' or 'eey'")
-        generate_profile_report(df)
+    @task()
+    def preprocess_and_save(raw_path: str) -> str:
+        """Preprocess, validate schema, snapshot schema, and save processed CSV."""
+        df = preprocess_data(raw_path)
+        validate_schema(df)
+        snapshot_schema(df)
         df.to_csv(LOCAL_PROCESSED_PATH, index=False)
+        log.info(f"Wrote processed data to {LOCAL_PROCESSED_PATH}")
         return LOCAL_PROCESSED_PATH
 
-    @task
-    def check_for_drift(processed_path: str):
+    @task()
+    def check_for_drift(processed_path: str) -> str:
+        """
+        If reference means exist, detect drift.
+        Returns 'self_healing' or 'train_models'.
+        """
         if not os.path.exists(REFERENCE_MEANS_PATH):
-            logging.warning("Reference means file not found, skipping drift detection.")
-            return "train_xgboost_hyperopt__task"
-        ref_path = generate_reference_means(processed_path, REFERENCE_MEANS_PATH)
-        return detect_data_drift(processed_path, ref_path)
+            log.warning("No reference means; skipping drift detection.")
+            return "train_models"
+        ref = generate_reference_means(processed_path, REFERENCE_MEANS_PATH)
+        return detect_data_drift(processed_path, ref)
 
-    @task(task_id="perform_self_healing__task")
-    def perform_self_healing():
-        handle_function_call({
-            "function": {
-                "name": "notify_slack",
-                "arguments": json.dumps({
-                    "channel": "#alerts",
-                    "title": "⚠️ Drift Detected",
-                    "details": "Self-healing was triggered after detecting significant drift.",
-                    "urgency": "medium"
-                })
-            }
-        })
+    @task()
+    def healing_task() -> str:
+        """Notify Slack of drift and simulate self‑healing."""
+        send_message(
+            channel="#alerts",
+            title="⚠️ Drift Detected",
+            details="Data drift detected; self‑healing routine executed.",
+            urgency="medium"
+        )
         time.sleep(5)
         return "override_done"
 
-    @task(task_id="train_xgboost_hyperopt__task")
-    def run_training(path: str):
-        return train_xgboost_hyperopt(path, manual_override())
+    @task()
+    def train_model_task(processed_path: str, model_id: str) -> float:
+        """Train a single XGBoost model with Hyperopt and return test RMSE."""
+        return train_xgboost_hyperopt(
+            processed_path,
+            override_params=manual_override(),
+            model_id=model_id
+        )
 
-    @task(task_id="compare_and_update_registry__task")
-    def run_compare_and_update():
-        return compare_and_update_registry()
+    @task()
+    def compare_task() -> str:
+        """Compare new models to production and update registry."""
+        compare_and_update_registry()
+        return "registry_updated"
 
-    @task
-    def record_metrics():
+    @task()
+    def record_metrics_task() -> str:
+        """Record system metrics (runtime, memory) via monitoring utility."""
         runtime = time.time()
-        mem = os.popen("free -m").read()
-        record_system_metrics(runtime=runtime, memory_usage=mem)
+        memory = os.popen("free -m").read()
+        record_system_metrics(runtime=runtime, memory_usage=memory)
         return "metrics_logged"
 
-    @task
-    def log_and_notify():
-        handle_function_call({
-            "function": {
-                "name": "notify_slack",
-                "arguments": json.dumps({
-                    "channel": "#alerts",
-                    "title": "✅ DAG Complete",
-                    "details": "Pipeline run complete and archived.",
-                    "urgency": "low"
-                })
-            }
-        })
-        return "done"
+    @task()
+    def notify_complete_task() -> str:
+        """Notify Slack that pipeline completed successfully."""
+        send_message(
+            channel="#alerts",
+            title="✅ Pipeline Complete",
+            details="All models trained and artifacts archived.",
+            urgency="low"
+        )
+        return "notified"
 
-    @task
-    def archive_outputs():
-        push_logs_to_s3("/home/ubuntu/airflow/logs/homeowner_dag.log")
-        archive_data(LOCAL_PROCESSED_PATH)
-        for path in [LOCAL_DATA_PATH, LOCAL_PROCESSED_PATH, REFERENCE_MEANS_PATH]:
-            if os.path.exists(path):
-                os.remove(path)
+    @task()
+    def archive_task() -> str:
+        """Upload logs and processed CSV to S3, then clean up."""
+        upload_to_s3("/home/airflow/logs/homeowner_dag.log", "logs/homeowner_dag.log")
+        upload_to_s3(LOCAL_PROCESSED_PATH, "archive/homeowner_processed.csv")
+        for p in [LOCAL_PROCESSED_PATH, REFERENCE_MEANS_PATH]:
+            if os.path.exists(p):
+                os.remove(p)
         return "archived"
 
-    # --- define dependencies and flow ---
-    ingestion_path  = ingest_and_validate()
-    processed_file  = preprocess_data(ingestion_path)
-    drift_result    = check_for_drift(processed_file)
-
-    healing         = perform_self_healing()
-    training        = run_training(processed_file)
-    update_registry = run_compare_and_update()
-    metrics         = record_metrics()
-    notification    = log_and_notify()
-    archiving       = archive_outputs()
+    # DAG flow
+    raw_path       = ingest_task()
+    processed_path = preprocess_and_save(raw_path)
+    drift_decision = check_for_drift(processed_path)
 
     branch = BranchPythonOperator(
-        task_id="branch_decision",
-        python_callable=lambda result: 
-            "perform_self_healing__task" if result == "self_healing" 
-            else "train_xgboost_hyperopt__task",
-        op_args=[drift_result],
+        task_id="branch_on_drift",
+        python_callable=lambda decision: "healing_task" if decision == "self_healing" else "train_models",
+        op_args=[drift_decision],
     )
 
-    join = EmptyOperator(task_id="join_branches", trigger_rule="one_success")
+    heal = healing_task()
+
+    train_tasks = train_model_task.expand(
+        processed_path=[processed_path] * len(MODEL_IDS),
+        model_id=MODEL_IDS
+    )
+
+    join_models = EmptyOperator(task_id="join_models", trigger_rule="one_success")
+
+    compare   = compare_task()
+    record    = record_metrics_task()
+    notify    = notify_complete_task()
+    archive   = archive_task()
 
     # wiring
-    ingestion_path >> processed_file >> drift_result >> branch
-    branch >> healing >> join
-    branch >> training >> join
-    join >> update_registry >> metrics >> notification >> archiving
+    raw_path >> processed_path >> drift_decision >> branch
+    branch >> heal >> join_models
+    branch >> train_tasks >> join_models
 
-dag = homeowner_dag()
+    join_models >> compare >> record >> notify >> archive
+
+dag = homeowner_pipeline()
