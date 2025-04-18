@@ -7,7 +7,7 @@ Retrying wrappers around common S3 operations.
 
 import boto3
 from tenacity import retry, wait_exponential, stop_after_attempt
-from .config import S3_BUCKET
+from utils.config import S3_BUCKET
 
 # Reuse a single boto3 client
 _s3_client = boto3.client("s3")

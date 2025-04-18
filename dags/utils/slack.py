@@ -2,32 +2,36 @@
 """
 utils/slack.py
 
-Helper to send Slack notifications via an incoming webhook,
-with built‑in retry logic to guard against transient failures.
+Send Slack messages via Incoming Webhook, with retries.
 """
 
-import os
 import requests
 from tenacity import retry, wait_fixed, stop_after_attempt
-from utils.config import SLACK_WEBHOOK_URL
+from utils.config import SLACK_WEBHOOK_URL, SLACK_CHANNEL_DEFAULT
 
 @retry(wait=wait_fixed(2), stop=stop_after_attempt(3))
-def post(channel: str, title: str, details: str, urgency: str) -> None:
+def post(
+    channel: str = SLACK_CHANNEL_DEFAULT,
+    title:   str = "",
+    details: str = "",
+    urgency: str = "low"
+) -> None:
     """
-    Send a formatted message to Slack.
+    Send a notification to Slack.
 
     Args:
-        channel (str): Slack channel name (e.g. "#alerts").
-        title (str): Short headline for the message.
-        details (str): Detailed body text.
-        urgency (str): Urgency level ("low", "medium", "high", etc.).
-
-    Raises:
-        requests.HTTPError: if Slack returns an error status.
+      channel: Slack channel name (e.g. "#alerts").
+      title:   Short headline.
+      details: Longer message body.
+      urgency: "low", "medium" or "high".
     """
     if not SLACK_WEBHOOK_URL:
-        raise ValueError("SLACK_WEBHOOK_URL is not configured.")
+        raise ValueError("SLACK_WEBHOOK_URL is not configured!")
+
     text = f"*{title}*\nChannel: {channel}\nUrgency: `{urgency}`\n\n{details}"
-    payload = {"text": text}
-    resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
+    resp = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=5)
     resp.raise_for_status()
+
+# backwards‐compatible aliases
+send_message = post
+post_message = post

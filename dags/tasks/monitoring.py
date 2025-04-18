@@ -13,8 +13,12 @@ import time
 import psutil
 from prometheus_client import start_http_server, Gauge
 
-# Start Prometheus metrics server
-start_http_server(8000)
+# Attempt to start Prometheus metrics server once
+try:
+    start_http_server(8000)
+    logging.info("Prometheus metrics server started on port 8000")
+except OSError as e:
+    logging.warning(f"Prometheus metrics server already running: {e}")
 
 # Define Prometheus gauges
 dag_runtime_gauge = Gauge(

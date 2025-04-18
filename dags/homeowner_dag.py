@@ -22,7 +22,7 @@ from tasks.schema_validation import validate_schema, snapshot_schema
 from tasks.drift import generate_reference_means, detect_data_drift, self_healing
 from tasks.training import train_xgboost_hyperopt, manual_override, compare_and_update_registry
 from tasks.monitoring import record_system_metrics
-from utils.slack import send_message
+from utils.slack import post as send_message
 from utils.storage import upload as upload_to_s3
 
 # Basic logging
@@ -48,7 +48,7 @@ default_args = {
     dag_id="homeowner_loss_history_full_pipeline",
     default_args=default_args,
     schedule_interval="0 10 * * *",  # run daily at 10am
-    catchup=True,
+    catchup=False,
     tags=["homeowner", "loss_history"],
 )
 def homeowner_pipeline():
@@ -64,7 +64,7 @@ def homeowner_pipeline():
         df = preprocess_data(raw_path)
         validate_schema(df)
         snapshot_schema(df)
-        df.to_csv(LOCAL_PROCESSED_PATH, index=False)
+        df.to_parquet(LOCAL_PROCESSED_PATH, index=False)
         log.info(f"Wrote processed data to {LOCAL_PROCESSED_PATH}")
         return LOCAL_PROCESSED_PATH
 

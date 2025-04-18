@@ -21,8 +21,8 @@ import numpy as np
 from airflow.models import Variable
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-from ..utils.storage import upload
-from ..utils.config import S3_BUCKET, REFERENCE_KEY_PREFIX
+from utils.storage import upload
+from utils.config import S3_BUCKET, REFERENCE_KEY_PREFIX
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")

@@ -4,11 +4,11 @@ preprocessing.py
 
 Handles:
   - Data loading from CSV
-  - Pandera schema validation
   - Handling missing values
   - Outlier detection and capping
   - Categorical encoding
   - Generating pure_premium & sample_weight
+  - Pandera schema validation (after pure_premium exists)
   - Selecting the correct loss-history features per MODEL_ID
   - Data profiling report + Slack notification
 """
@@ -17,7 +17,7 @@ import os
 import json
 import logging
 import time
-from typing import List, Dict
+from typing import Dict
 
 import pandas as pd
 from ydata_profiling import ProfileReport
@@ -26,7 +26,7 @@ from tasks.schema_validation import validate_schema
 from agent_actions import handle_function_call
 
 # configure logging
-logging.basicConfig(level=logging.INFO, format="%((asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 PROFILE_REPORT_PATH = "/tmp/homeowner_profile_report.html"
 
@@ -150,7 +150,7 @@ def generate_profile_report(df: pd.DataFrame, output_path: str = PROFILE_REPORT_
     try:
         handle_function_call({
             "function": {
-                "name": "notify_slack",
+                "name": "notify_success",
                 "arguments": json.dumps({
                     "channel": "#agent_logs",
                     "title": "📊 Profiling Summary",
@@ -171,43 +171,44 @@ def preprocess_data(
     """
     Full preprocessing pipeline:
       1. Load CSV
-      2. Pandera schema validation
-      3. Missing data handling
-      4. Outlier detection & capping
-      5. Categorical encoding
-      6. Compute pure_premium & sample_weight
+      2. Handle missing values
+      3. Detect & cap outliers
+      4. Categorical encoding
+      5. Compute pure_premium & sample_weight
+      6. Pandera schema validation
       7. Model‑specific feature selection
       8. Profiling & Slack notification
     """
+    # 1) Load CSV
     df = load_data_to_dataframe(csv_path)
 
-    # 2) validate against schema
-    df = validate_schema(df)
-
-    # 3) missing values
+    # 2) Missing data
     df = handle_missing_data(df, strategy, missing_threshold)
 
-    # 4) detect & cap outliers
+    # 3) Detect & cap outliers
     _ = detect_outliers_iqr(df)
     for col in df.select_dtypes(include="number"):
         df = cap_outliers(df, col)
 
-    # 5) encode categoricals
+    # 4) Encode categoricals
     df = encode_categoricals(df)
 
-    # 6) compute target & weight
+    # 5) Compute target & weight
     if "pure_premium" not in df.columns:
         if {"il_total", "eey"}.issubset(df.columns):
-            df["pure_premium"] = df["il_total"] / df["eey"]
+            df["pure_premium"]  = df["il_total"] / df["eey"]
             df["sample_weight"] = df["eey"]
             logging.info("Computed pure_premium & sample_weight")
         else:
             raise ValueError("Columns 'il_total' and 'eey' required to compute pure_premium")
 
-    # 7) select only the features needed for this MODEL_ID
+    # 6) Now that pure_premium exists, validate against schema
+    df = validate_schema(df)
+
+    # 7) Select only the features needed for this MODEL_ID
     df = select_model_features(df)
 
-    # 8) profile and notify
+    # 8) Profile & notify
     generate_profile_report(df)
 
     return df

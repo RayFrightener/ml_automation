@@ -3,7 +3,7 @@ import os
 import logging
 import boto3
 from airflow.models import Variable
-from dags.tasks.cache import is_cache_valid, update_cache
+from tasks.cache import is_cache_valid, update_cache
 
 S3_BUCKET = os.environ.get("S3_BUCKET", Variable.get("S3_BUCKET", default_var="grange-seniordesign-bucket"))
 S3_DATA_FOLDER = "raw-data"
