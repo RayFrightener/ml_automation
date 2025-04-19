@@ -11,6 +11,7 @@ Handles:
   - Pandera schema validation (after pure_premium exists)
   - Selecting the correct loss-history features per MODEL_ID
   - Data profiling report + Slack notification via agent_actions
+  - Integration of new UI components and endpoints
 """
 
 import os
@@ -178,6 +179,7 @@ def preprocess_data(
       6. Pandera schema validation
       7. Model‑specific feature selection
       8. Profiling & Slack notification
+      9. Integration of new UI components and endpoints
     """
     # 1) Load CSV
     df = load_data_to_dataframe(csv_path)
@@ -210,5 +212,21 @@ def preprocess_data(
 
     # 8) Profile & notify
     generate_profile_report(df)
+
+    # 9) Integrate new UI components and endpoints
+    try:
+        handle_function_call({
+            "function": {
+                "name": "integrate_ui_components",
+                "arguments": json.dumps({
+                    "channel": "#agent_logs",
+                    "title": "🔗 Integrating UI Components",
+                    "details": "Integrating new UI components and endpoints.",
+                    "urgency": "low"
+                })
+            }
+        })
+    except Exception as e:
+        logging.warning(f"UI components integration failed: {e}")
 
     return df
