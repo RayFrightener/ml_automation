@@ -1,8 +1,8 @@
-# Homeowner Loss‑History AI Agent UI Design (Markdown)
+# Homeowner Loss‑History AI Agent UI Design
 
 ## 1. Overview
 - **Purpose**: A streamlined, futuristic, human‑in‑the‑loop dashboard for administering the complete loss‑history pipeline. Combines minimalistic design with powerful controls for error monitoring, agent‑driven fixes, and manual overrides.
-- **Aesthetic**: Clean lines, open whitespace, light & dark mode toggle, soft neon accents on hover states.
+- **Aesthetic**: Clean lines, open whitespace, a light and dark mode toggle, and soft neon accents on hover states.
 
 ## 2. Main Navigation
 - **Sidebar** (left, collapsible) with icon + label and hover tooltip
