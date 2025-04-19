@@ -44,7 +44,7 @@ from utils.slack import post as slack_msg
 from utils.storage import upload as s3_upload, download as s3_download
 
 LOGGER = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 
 def manual_override() -> Optional[Dict[str, Any]]:
@@ -268,6 +268,22 @@ def train_and_compare_fn(model_id: str, processed_path: str) -> None:
         "%s finished in %.1fs — RMSE %.4f, MSE %.4f, MAE %.4f, R² %.4f (%s)",
         model_id, time.time() - start, rmse, mse, mae, r2, status
     )
+
+    # Integrate new UI components and endpoints
+    try:
+        handle_function_call({
+            "function": {
+                "name": "integrate_ui_components",
+                "arguments": json.dumps({
+                    "channel": "#agent_logs",
+                    "title": "🔗 Integrating UI Components",
+                    "details": "Integrating new UI components and endpoints.",
+                    "urgency": "low"
+                })
+            }
+        })
+    except Exception as e:
+        LOGGER.warning(f"UI components integration failed: {e}")
 
 # backward‑compatibility alias
 train_xgboost_hyperopt = train_and_compare_fn

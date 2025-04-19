@@ -159,5 +159,66 @@ def homeowner_pipeline():
 
     join_after_training >> record_metrics_task() >> notify_complete() >> archive()
 
+    # 7️⃣ Generate Fix Proposals
+    @task()
+    def generate_fix_proposals():
+        send_message(
+            channel="#alerts",
+            title="🔧 Generating Fix Proposals",
+            details="Generating fix proposals based on detected issues.",
+            urgency="low",
+        )
+        # Placeholder for generating fix proposals logic
+
+    # 8️⃣ Run Self-Heal
+    @task()
+    def run_self_heal():
+        send_message(
+            channel="#alerts",
+            title="🛠️ Running Self-Heal",
+            details="Executing self-heal routine.",
+            urgency="medium",
+        )
+        drift_self_heal()
+
+    # 9️⃣ Open Code Console
+    @task()
+    def open_code_console():
+        send_message(
+            channel="#alerts",
+            title="💻 Opening Code Console",
+            details="Opening code console for manual interventions.",
+            urgency="low",
+        )
+        # Placeholder for opening code console logic
+
+    # WebSocket for live updates
+    @task()
+    def implement_websockets():
+        send_message(
+            channel="#alerts",
+            title="🔄 Implementing WebSockets",
+            details="Setting up WebSockets for live updates.",
+            urgency="low",
+        )
+        # Placeholder for WebSocket implementation logic
+
+    # Integrate new UI components and endpoints
+    @task()
+    def integrate_ui_components():
+        send_message(
+            channel="#alerts",
+            title="🔗 Integrating UI Components",
+            details="Integrating new UI components and endpoints.",
+            urgency="low",
+        )
+        # Placeholder for UI components integration logic
+
+    # Define dependencies for new tasks
+    join_after_training >> generate_fix_proposals()
+    join_after_training >> run_self_heal()
+    join_after_training >> open_code_console()
+    join_after_training >> implement_websockets()
+    join_after_training >> integrate_ui_components()
 
 dag = homeowner_pipeline()

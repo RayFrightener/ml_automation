@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    "build": "echo \"No build process required.\"",
+    "test": "pytest dag_test.py hyper_track_test.py model_evalution_test.py test_imports.py"
+  }
+}

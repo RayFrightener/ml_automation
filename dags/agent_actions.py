@@ -59,6 +59,11 @@ def execute_python(code: str) -> Any:
     Execute Python code in the Code Interpreter sandbox and return the result.
     This stub is handled by the OpenAI Code Interpreter tool.
     """
+    if not code.startswith("/tmp/"):
+        raise PermissionError("Code execution restricted to /tmp directory only.")
+    logging.info(f"Executing code: {code}")
+    # Log the action for audit trail
+    log_manual_action("execute_python", {"code": code})
     pass
 
 
@@ -235,3 +240,28 @@ def audit_data_quality(dataset_path: str) -> Dict[str, Any]:
     report = {"nulls": 0, "duplicates": 0, "schema_violations": 0}
     logging.info("Completed data quality audit.")
     return report
+
+###############################################
+# Role-Based Access Control (RBAC)
+###############################################
+def check_permissions(user_role: str, action: str) -> bool:
+    """
+    Check if the user role has permission to perform the action.
+    """
+    role_permissions = {
+        "admin": ["execute_python", "propose_fix", "override_decision", "generate_root_cause_report",
+                  "suggest_hyperparam_improvement", "validate_data_integrity", "describe_fix_plan",
+                  "fetch_airflow_logs", "update_airflow_variable", "list_recent_failures", "escalate_issue",
+                  "detect_and_flag_drift", "schedule_retraining", "explain_model_decision", "approve_deployment",
+                  "rollback_model", "generate_executive_summary", "open_incident_ticket", "optimize_compute_resources",
+                  "simulate_what_if", "audit_data_quality"],
+        "viewer": ["fetch_airflow_logs", "list_recent_failures", "generate_executive_summary"]
+    }
+    allowed_actions = role_permissions.get(user_role, [])
+    return action in allowed_actions
+
+def log_manual_action(action: str, details: Dict[str, Any]) -> None:
+    """
+    Log every manual action and chat command for audit trail.
+    """
+    logging.info(f"Manual action logged: {action} with details: {details}")
