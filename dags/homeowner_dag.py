@@ -3,7 +3,7 @@
 homeowner_dag.py
 
 Home‑owner Loss‑History full pipeline DAG
-• Ingest → Preprocess → Drift‑Check → (Self‑Heal ⧸ Manual‑Override → Train) 
+• Ingest → Preprocess → Drift‑Check → (Self‑Heal ⧸ Manual‑Override → Train)
 • Human‑in‑the‑Loop hooks for manual override
 • Metrics, Notifications, Archive
 """
@@ -21,7 +21,11 @@ from airflow.utils.trigger_rule import TriggerRule
 from tasks.ingestion import ingest_data_from_s3
 from tasks.preprocessing import preprocess_data
 from tasks.schema_validation import validate_schema, snapshot_schema
-from tasks.drift import generate_reference_means, detect_data_drift, self_healing as drift_self_heal
+from tasks.drift import (
+    generate_reference_means,
+    detect_data_drift,
+    self_healing as drift_self_heal
+)
 from tasks.monitoring import record_system_metrics
 from tasks.training import train_and_compare_fn, manual_override
 from utils.slack import post as send_message
@@ -35,6 +39,7 @@ log = logging.getLogger(__name__)
 LOCAL_PROCESSED_PATH = "/tmp/homeowner_processed.parquet"
 REFERENCE_MEANS_PATH = "/tmp/reference_means.csv"
 MODEL_IDS = ["model1", "model2", "model3", "model4", "model5"]
+
 
 def _default_args():
     return {
@@ -51,7 +56,7 @@ def _default_args():
 @dag(
     dag_id="homeowner_loss_history_full_pipeline",
     default_args=_default_args(),
-    schedule_interval="0 10 * * *",  # daily at 10 AM
+    schedule_interval="0 10 * * *",  # daily at 10 AM
     catchup=False,
     tags=["homeowner", "loss_history"],
 )
@@ -74,7 +79,6 @@ def homeowner_pipeline():
     @task.branch()
     def _branch(path: str) -> str:
         if os.path.exists(REFERENCE_MEANS_PATH):
-            # generate new reference and detect drift
             ref = generate_reference_means(path, REFERENCE_MEANS_PATH)
             flag = detect_data_drift(path, ref)
             return "healing_task" if flag == "self_healing" else "override_or_train"
@@ -107,7 +111,7 @@ def homeowner_pipeline():
             details=f"Custom hyperparams: {params}",
             urgency="low",
         )
-        # actual training will pick up manual_override internally
+        # training task will consume manual_override internally
 
     start_training = EmptyOperator(task_id="start_training")
 
@@ -145,7 +149,6 @@ def homeowner_pipeline():
 
     @task()
     def archive():
-        # upload logs and processed data, then cleanup
         upload_to_s3("/home/airflow/logs/homeowner_dag.log", "logs/homeowner_dag.log")
         upload_to_s3(LOCAL_PROCESSED_PATH, "archive/homeowner_processed.parquet")
         for f in (LOCAL_PROCESSED_PATH, REFERENCE_MEANS_PATH):
@@ -155,5 +158,6 @@ def homeowner_pipeline():
                 pass
 
     join_after_training >> record_metrics_task() >> notify_complete() >> archive()
+
 
 dag = homeowner_pipeline()

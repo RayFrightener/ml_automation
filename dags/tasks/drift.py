@@ -11,6 +11,7 @@ Refactored to:
   - Use utils/storage.upload instead of boto3 directly.
   - Version the reference means file on upload under a timestamped prefix.
   - Wrap S3 operations with tenacity retries.
+  - Load drift threshold from Airflow Variable "DRIFT_THRESHOLD".
 """
 
 import os
@@ -25,10 +26,19 @@ from utils.storage import upload
 from utils.config import S3_BUCKET, REFERENCE_KEY_PREFIX
 
 # Setup logging
+t=logging.getLogger()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # Local path for the reference means CSV
 REFERENCE_MEANS_PATH = "/tmp/reference_means.csv"
+
+# Drift threshold loaded from Airflow Variable or default 0.1
+try:
+    DRIFT_THRESHOLD = float(Variable.get("DRIFT_THRESHOLD", default_var="0.1"))
+except Exception:
+    DRIFT_THRESHOLD = 0.1
+    logging.warning(f"Using default drift threshold {DRIFT_THRESHOLD}")
+
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def generate_reference_means(
@@ -39,7 +49,7 @@ def generate_reference_means(
     Generates a timestamped reference means CSV and uploads it to S3 under the configured prefix.
 
     Args:
-        processed_path: Path to the latest processed data CSV.
+        processed_path: Path to the latest processed data parquet.
         local_ref: Local path to write the reference means.
 
     Returns:
@@ -54,29 +64,32 @@ def generate_reference_means(
     )
     means.to_csv(local_ref, index=False)
 
-    # version with timestamp
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     s3_key = f"{REFERENCE_KEY_PREFIX}/reference_means_{ts}.csv"
     upload(local_ref, s3_key)
     logging.info(f"Uploaded reference means to s3://{S3_BUCKET}/{s3_key}")
     return local_ref
 
+
 def detect_data_drift(
     current_data_path: str,
     reference_means_path: str,
-    threshold: float = 0.1
+    threshold: float = None
 ) -> str:
     """
     Compares current data means vs. the reference means to detect drift.
 
     Args:
-        current_data_path: Path to the current processed CSV.
+        current_data_path: Path to the current processed parquet.
         reference_means_path: Path to a versioned reference means CSV.
-        threshold: Fractional threshold for drift.
+        threshold: Fractional threshold for drift; if None uses DRIFT_THRESHOLD.
 
     Returns:
         "self_healing" if drift detected, else "train_xgboost_hyperopt".
     """
+    if threshold is None:
+        threshold = DRIFT_THRESHOLD
+
     df_current = pd.read_parquet(current_data_path)
     df_ref     = pd.read_csv(reference_means_path)
     ref_map    = dict(zip(df_ref["column_name"], df_ref["mean_value"]))
@@ -99,6 +112,7 @@ def detect_data_drift(
             logging.warning(f"Reference mean for '{col}' is zero, skipping drift check.")
 
     return "self_healing" if drifted else "train_xgboost_hyperopt"
+
 
 def self_healing() -> str:
     """
