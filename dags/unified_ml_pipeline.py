@@ -35,6 +35,10 @@ from pathlib import Path
 from functools import wraps
 from typing import Dict, Any, Optional, Tuple, Union, List
 
+# Initialize logging early so it is available during any import errors
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # Airflow imports
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
@@ -68,7 +72,6 @@ try:
     import tasks.model_explainability as model_explainability
     import tasks.hitl as hitl  # Import the new Human-in-the-Loop module
     import tasks.model_comparison as model_comparison  # Import model comparison module
-    import tasks.predictions as predictions  # Import predictions module
 except ImportError as e:
     # Log the import error but continue - the specific module will fail at runtime if used
     logger.error(f"Error importing module: {str(e)}")
@@ -108,12 +111,6 @@ except ImportError as e:
         hitl = EmptyModule()
     if 'model_comparison' not in locals():
         model_comparison = EmptyModule()
-    if 'predictions' not in locals():
-        predictions = EmptyModule()
-
-# Initialize logging early so it is available during any import errors
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Remove Slack initialization - Using logs only
 logger.info("Slack notifications disabled - using logs only")
@@ -810,7 +807,7 @@ def model_explainability(**context):
         return None
     
     # Create explainer
-    explainer = explainability.ModelExplainer()
+    explainer = model_explainability.ModelExplainer()
     
     try:
         # Generate explanations
@@ -858,17 +855,31 @@ def generate_predictions(**context):
         if not processed_path or not os.path.exists(processed_path):
             raise AirflowException(f"Processed data path not found: {processed_path}")
     
-    # Create predictor
-    predictor = predictions.ModelPredictor()
+    # Load the data
+    try:
+        data = pd.read_parquet(processed_path)
+        X = data.drop('target', axis=1)  # Assuming 'target' is the target column
+        y = data['target']
+    except Exception as e:
+        logger.error(f"Error loading data for predictions: {str(e)}")
+        return None
+    
+    # Create evaluator which has prediction functionality
+    evaluator = model_evaluation.ModelEvaluation()
     
     try:
-        # Generate predictions
-        prediction_results = predictor.generate_predictions(
-            model_id=best_model_id,
-            processed_data_path=processed_path
+        # Get the model from MLflow
+        model = mlflow.sklearn.load_model(f"models:/{best_model_id}/Production")
+        
+        # Generate predictions using the evaluate_model method
+        prediction_results = evaluator.evaluate_model(
+            model=model,
+            X_test=X,
+            y_test=y,
+            run_id=None  # We don't want to log these predictions as evaluation metrics
         )
         
-        if prediction_results:
+        if prediction_results and prediction_results['status'] == 'success':
             logger.info(f"Generated predictions for model {best_model_id}")
             
             # Store prediction results
