@@ -903,7 +903,7 @@ def model_comparison(**context):
         if not processed_path or not os.path.exists(processed_path):
             raise AirflowException(f"Processed data path not found: {processed_path}")
     try:
-        comparison_results = model_comparison.compare_model_results(
+        comparison_results = compare_model_results(
             model_results=evaluation_results,
             task_type='regression',
             notify_slack=False
@@ -1203,7 +1203,7 @@ with dag:
         )
         
         # Compare models task - using the task-decorated function directly
-        model_comparison_task = model_comparison.compare_model_results.override(
+        model_comparison_task = compare_model_results.override(
             task_id='model_comparison_task'
         )(
             model_results="{{ ti.xcom_pull(task_ids='train_models_group.train_models_task') }}",
