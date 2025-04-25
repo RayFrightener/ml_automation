@@ -783,193 +783,140 @@ def healing_task(**context):
 def model_explainability(**context):
     """Generate explanations for the best model"""
     logger.info("Starting model_explainability task")
-    
     ti = context['ti']
-    
-    # Get best model ID from model comparison
-    best_model_id = ti.xcom_pull(task_ids='compare_models_task', key='best_model_id')
-    
+    best_model_id = ti.xcom_pull(task_ids='train_models_group.model_comparison_task', key='best_model_id')
     if not best_model_id:
-        logger.warning("No best model ID found for explainability task")
-        return None
-    
-    # First check for data at the standardized location
+        logger.error("No best model ID found for explainability task")
+        raise AirflowException("No best model ID found for explainability task")
     if os.path.exists(LOCAL_PROCESSED_PATH):
         processed_path = LOCAL_PROCESSED_PATH
         logger.info(f"Using data from standardized location: {processed_path}")
     else:
-        # Get processed data path from XCom
         processed_path = ti.xcom_pull(task_ids='preprocess_data_task', key='processed_data_path')
         if not processed_path or not os.path.exists(processed_path):
             raise AirflowException(f"Processed data path not found: {processed_path}")
-    
-    # Check if training was completed
-    training_results = ti.xcom_pull(task_ids='train_models_task', key='training_results')
+    training_results = ti.xcom_pull(task_ids='train_models_group.train_models_task', key='training_results')
     if not training_results:
-        logger.warning("No training results found for explainability task")
-        return None
-    
+        logger.error("No training results found for explainability task")
+        raise AirflowException("No training results found for explainability task")
     try:
-        # Load the data
         data = pd.read_parquet(processed_path)
-        X = data.drop('target', axis=1)  # Assuming 'target' is the target column
+        X = data.drop('target', axis=1)
         y = data['target']
-        
-        # Get the model from MLflow
         model = mlflow.sklearn.load_model(f"models:/{best_model_id}/Production")
-        
-        # Create explainer with correct class name
         explainer = model_explainability.ModelExplainabilityTracker(model_id=best_model_id)
-        
-        # Generate explanations
         explanation_results = explainer.track_model_and_data(
             model=model,
             X=X,
             y=y,
-            run_id=None  # We don't want to log these explanations as part of training
+            run_id=None
         )
-        
         if explanation_results:
             logger.info(f"Generated explanations for model {best_model_id}")
-            
-            # Store explanation results
             ti.xcom_push(key='explanation_results', value=explanation_results)
-            
             return explanation_results
         else:
-            logger.warning(f"No explanation results generated for model {best_model_id}")
-            return None
-            
+            logger.error(f"No explanation results generated for model {best_model_id}")
+            raise AirflowException(f"No explanation results generated for model {best_model_id}")
     except Exception as e:
         logger.error(f"Error generating model explanations: {str(e)}")
-        # Don't fail the pipeline for explainability issues
-        return None
+        raise AirflowException(f"Error generating model explanations: {str(e)}")
 
 def model_evaluation(**context):
     """Evaluate model against test data and record metrics"""
     logger.info("Starting model_evaluation task")
-    
     ti = context['ti']
-    
-    # Get training results
-    training_results = ti.xcom_pull(task_ids='train_models_group.train_models_task')
-    
+    training_results = ti.xcom_pull(task_ids='train_models_group.train_models_task', key='training_results')
     if not training_results:
+        logger.error("No training results found for model evaluation")
         raise AirflowException("No training results found for model evaluation")
-    
-    # First check for data at the standardized location
     if os.path.exists(LOCAL_PROCESSED_PATH):
         processed_path = LOCAL_PROCESSED_PATH
         logger.info(f"Using data from standardized location: {processed_path}")
     else:
-        # Get processed data path from XCom
         processed_path = ti.xcom_pull(task_ids='preprocess_data_task', key='processed_data_path')
         if not processed_path or not os.path.exists(processed_path):
             raise AirflowException(f"Processed data path not found: {processed_path}")
-    
-    # Create evaluator with correct class name
     evaluator = model_evaluation.ModelEvaluation()
-    
-    # Evaluate all models
     evaluation_results = {}
-    
+    any_failed = False
     for model_id, result in training_results.items():
         if result and isinstance(result, dict) and result.get('status') == 'completed':
             model = result.get('model')
             run_id = result.get('run_id')
-            
             if model is not None:
                 try:
-                    # Load the data
                     data = pd.read_parquet(processed_path)
-                    X = data.drop('target', axis=1)  # Assuming 'target' is the target column
+                    X = data.drop('target', axis=1)
                     y = data['target']
-                    
-                    # Evaluate this model
                     metrics = evaluator.evaluate_model(
                         model=model,
                         X_test=X,
                         y_test=y,
                         run_id=run_id
                     )
-                    
                     evaluation_results[model_id] = {
                         'status': 'completed',
                         'metrics': metrics,
                         'run_id': run_id
                     }
-                    
                     logger.info(f"Evaluation completed for model {model_id}")
-                    
                 except Exception as e:
                     logger.error(f"Error evaluating model {model_id}: {str(e)}")
                     evaluation_results[model_id] = {
                         'status': 'failed',
                         'error': str(e)
                     }
+                    any_failed = True
             else:
                 logger.warning(f"No model object found for {model_id}")
                 evaluation_results[model_id] = {
                     'status': 'failed',
                     'error': 'No model object found'
                 }
+                any_failed = True
         else:
             logger.warning(f"No valid training results for {model_id}")
             evaluation_results[model_id] = {
                 'status': 'failed',
                 'error': 'No valid training results'
             }
-    
-    # Store results in XCom
+            any_failed = True
+    if any_failed:
+        raise AirflowException("One or more models failed during evaluation. See logs for details.")
     ti.xcom_push(key='evaluation_results', value=evaluation_results)
-    
     return evaluation_results
 
 def model_comparison(**context):
     """Compare models and select the best one based on evaluation metrics"""
     logger.info("Starting model_comparison task")
-    
     ti = context['ti']
-    
-    # Get evaluation results
-    evaluation_results = ti.xcom_pull(task_ids='evaluate_models_task', key='evaluation_results')
-    
+    evaluation_results = ti.xcom_pull(task_ids='train_models_group.model_comparison_task', key='comparison_results')
     if not evaluation_results:
+        logger.error("No evaluation results found for model comparison")
         raise AirflowException("No evaluation results found for model comparison")
-    
-    # First check for data at the standardized location
     if os.path.exists(LOCAL_PROCESSED_PATH):
         processed_path = LOCAL_PROCESSED_PATH
         logger.info(f"Using data from standardized location: {processed_path}")
     else:
-        # Get processed data path from XCom
         processed_path = ti.xcom_pull(task_ids='preprocess_data_task', key='processed_data_path')
         if not processed_path or not os.path.exists(processed_path):
             raise AirflowException(f"Processed data path not found: {processed_path}")
-    
-    # Compare models using the task-decorated function directly
     try:
         comparison_results = model_comparison.compare_model_results(
             model_results=evaluation_results,
             task_type='regression',
             notify_slack=False
         )
-        
-        # If we have a best model, record it
         if comparison_results and comparison_results.get('best_model'):
             best_model_id = comparison_results.get('best_model')
             logger.info(f"Selected best model: {best_model_id}")
-            
-            # Store the ID of the best model
             ti.xcom_push(key='best_model_id', value=best_model_id)
-            
-            # Store full comparison results
             ti.xcom_push(key='comparison_results', value=comparison_results)
-            
             return comparison_results
         else:
+            logger.error("No best model identified during comparison")
             raise AirflowException("No best model identified during comparison")
-            
     except Exception as e:
         logger.error(f"Error during model comparison: {str(e)}")
         raise AirflowException(f"Model comparison failed: {str(e)}")
@@ -1021,7 +968,7 @@ def wait_for_model_approval(**context):
     logger.info("Starting wait_for_model_approval task")
     
     ti = context['ti']
-    comparison_results = ti.xcom_pull(task_ids='train_models_group.model_comparison_task')
+    comparison_results = ti.xcom_pull(task_ids='train_models_group.model_comparison_task', key='comparison_results')
     
     if not comparison_results:
         raise AirflowException("No model comparison results found")
@@ -1132,6 +1079,36 @@ def cleanup_temp_files(**context):
             logger.warning(f"Error removing directory {dirpath}: {str(e)}")
     
     return {"status": "success", "message": "Cleanup completed"}
+
+def generate_predictions(**context):
+    """Generate predictions using the best model."""
+    logger.info("Starting generate_predictions task")
+    ti = context['ti']
+    best_model_id = ti.xcom_pull(task_ids='train_models_group.model_comparison_task', key='best_model_id')
+    if not best_model_id:
+        logger.error("No best model ID found for predictions task")
+        raise AirflowException("No best model ID found for predictions task")
+    if os.path.exists(LOCAL_PROCESSED_PATH):
+        processed_path = LOCAL_PROCESSED_PATH
+    else:
+        processed_path = ti.xcom_pull(task_ids='preprocess_data_task', key='processed_data_path')
+        if not processed_path or not os.path.exists(processed_path):
+            raise AirflowException(f"Processed data path not found: {processed_path}")
+    try:
+        data = pd.read_parquet(processed_path)
+        X = data.drop('target', axis=1)
+    except Exception as e:
+        logger.error(f"Error loading data for predictions: {str(e)}")
+        raise AirflowException(f"Error loading data for predictions: {str(e)}")
+    try:
+        model = mlflow.sklearn.load_model(f"models:/{best_model_id}/Production")
+        predictions = model.predict(X)
+        ti.xcom_push(key='predictions', value=predictions.tolist())
+        logger.info(f"Generated predictions for model {best_model_id}")
+        return predictions.tolist()
+    except Exception as e:
+        logger.error(f"Error generating predictions: {str(e)}")
+        raise AirflowException(f"Error generating predictions: {str(e)}")
 
 # Create the DAG
 dag = DAG(
