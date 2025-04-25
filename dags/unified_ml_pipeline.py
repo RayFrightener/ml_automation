@@ -111,7 +111,7 @@ except ImportError as e:
     if 'predictions' not in locals():
         predictions = EmptyModule()
 
-# Setup logging
+# Initialize logging early so it is available during any import errors
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -279,12 +279,13 @@ def download_data(**context):
     try:
         s3_client = boto3.client('s3', region_name=config.AWS_REGION)
         
-        # Check both raw-data and raw_data prefixes to find the target file
-        for prefix in ["raw-data/", "raw_data/"]:
+        # Extend search prefixes to include the archive folder where processed data may reside
+        for prefix in ["raw-data/", "raw_data/", "archive/"]:
             response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
             if 'Contents' in response:
                 for obj in response['Contents']:
-                    if obj['Key'].endswith('ut_loss_history_1.csv'):
+                    # Look for either the original raw file or the processed homeowner file
+                    if obj['Key'].endswith('ut_loss_history_1.csv') or obj['Key'].endswith('homeowner_processed.csv'):
                         key = obj['Key']
                         logger.info(f"Found target file at path: {key}")
                         break
