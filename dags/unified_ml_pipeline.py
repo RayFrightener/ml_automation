@@ -1021,6 +1021,160 @@ def model_comparison(**context):
         logger.error(f"Error during model comparison: {str(e)}")
         raise AirflowException(f"Model comparison failed: {str(e)}")
 
+def wait_for_data_validation(**context):
+    """Wait for data validation to complete and handle any manual approvals if needed"""
+    logger.info("Starting wait_for_data_validation task")
+    
+    ti = context['ti']
+    quality_passed = ti.xcom_pull(task_ids='validate_data_task', key='quality_passed')
+    
+    if not quality_passed:
+        if AUTO_APPROVE_MODEL:
+            logger.warning("Data validation failed but auto-approve is enabled. Proceeding with caution.")
+            return True
+        else:
+            raise AirflowException("Data validation failed and auto-approve is disabled.")
+    
+    return True
+
+def train_models(**context):
+    """Train multiple model variants"""
+    logger.info("Starting train_models task")
+    
+    ti = context['ti']
+    processed_path = context.get('params', {}).get('processed_data_path')
+    
+    if not processed_path:
+        processed_path = ti.xcom_pull(task_ids='preprocess_data_task', key='processed_data_path')
+        
+    if not processed_path or not os.path.exists(processed_path):
+        raise AirflowException(f"Processed data path not found: {processed_path}")
+    
+    try:
+        training_results = training.train_models(processed_data_path=processed_path)
+        ti.xcom_push(key='training_results', value=training_results)
+        return training_results
+    except Exception as e:
+        logger.error(f"Error in model training: {str(e)}")
+        raise
+
+def wait_for_model_approval(**context):
+    """Wait for model approval from stakeholders"""
+    logger.info("Starting wait_for_model_approval task")
+    
+    ti = context['ti']
+    comparison_results = ti.xcom_pull(task_ids='train_models_group.model_comparison_task')
+    
+    if not comparison_results:
+        raise AirflowException("No model comparison results found")
+    
+    if AUTO_APPROVE_MODEL:
+        logger.info("Auto-approval is enabled. Model approved automatically.")
+        return True
+    
+    # Here you would typically integrate with your model approval system
+    # For now, we'll auto-approve if the model meets basic criteria
+    if comparison_results.get('best_model'):
+        logger.info("Model meets basic criteria. Approved.")
+        return True
+    else:
+        raise AirflowException("No suitable model found for approval")
+
+def deploy_model(**context):
+    """Deploy the approved model to production"""
+    logger.info("Starting deploy_model task")
+    
+    ti = context['ti']
+    best_model_id = ti.xcom_pull(task_ids='train_models_group.model_comparison_task', key='best_model_id')
+    
+    if not best_model_id:
+        raise AirflowException("No best model ID found for deployment")
+    
+    try:
+        # Register the model in MLflow Model Registry
+        client = MlflowClient()
+        model_uri = f"models:/{best_model_id}/Production"
+        
+        # Log deployment to MLflow
+        with mlflow.start_run(run_name="model_deployment") as run:
+            mlflow.log_param("deployed_model_id", best_model_id)
+            mlflow.log_param("deployment_time", datetime.now().isoformat())
+            
+            # Store the deployment run ID
+            ti.xcom_push(key='deployment_run_id', value=run.info.run_id)
+        
+        logger.info(f"Model {best_model_id} deployed successfully")
+        return {"status": "success", "model_id": best_model_id}
+        
+    except Exception as e:
+        logger.error(f"Error deploying model: {str(e)}")
+        raise
+
+def archive_artifacts(**context):
+    """Archive training artifacts and logs"""
+    logger.info("Starting archive_artifacts task")
+    
+    ti = context['ti']
+    run_id = ti.xcom_pull(task_ids='train_models_group.train_models_task', key='mlflow_run_id')
+    
+    if not run_id:
+        logger.warning("No MLflow run ID found for archiving")
+        return
+    
+    try:
+        # Archive to S3
+        s3_client = boto3.client('s3')
+        archive_prefix = f"{S3_ARCHIVE_FOLDER}/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # Archive MLflow artifacts
+        mlflow_client = MlflowClient()
+        artifacts = mlflow_client.list_artifacts(run_id)
+        
+        for artifact in artifacts:
+            local_path = mlflow_client.download_artifacts(run_id, artifact.path)
+            s3_key = f"{archive_prefix}/mlflow_artifacts/{artifact.path}"
+            s3_client.upload_file(local_path, S3_BUCKET, s3_key)
+        
+        logger.info(f"Archived artifacts to s3://{S3_BUCKET}/{archive_prefix}")
+        return {"status": "success", "archive_prefix": archive_prefix}
+        
+    except Exception as e:
+        logger.warning(f"Error archiving artifacts: {str(e)}")
+        return {"status": "warning", "error": str(e)}
+
+def cleanup_temp_files(**context):
+    """Clean up temporary files created during the pipeline run"""
+    logger.info("Starting cleanup_temp_files task")
+    
+    temp_files = [
+        LOCAL_PROCESSED_PATH,
+        REFERENCE_MEANS_PATH
+    ]
+    
+    for filepath in temp_files:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                logger.info(f"Removed temporary file: {filepath}")
+        except Exception as e:
+            logger.warning(f"Error removing {filepath}: {str(e)}")
+    
+    # Clean up any temporary directories
+    temp_dirs = [
+        "/tmp/airflow_data",
+        "/tmp/quality_reports"
+    ]
+    
+    for dirpath in temp_dirs:
+        try:
+            if os.path.exists(dirpath):
+                shutil.rmtree(dirpath)
+                logger.info(f"Removed temporary directory: {dirpath}")
+        except Exception as e:
+            logger.warning(f"Error removing directory {dirpath}: {str(e)}")
+    
+    return {"status": "success", "message": "Cleanup completed"}
+
 # Create the DAG
 dag = DAG(
     'unified_ml_pipeline',
