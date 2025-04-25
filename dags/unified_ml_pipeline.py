@@ -698,7 +698,10 @@ def check_for_drift(**context):
     
     # Perform drift detection
     try:
-        drift_results = safe_module_call(drift, "detect_data_drift", processed_data_path=processed_path)
+        # Call detect_data_drift with the correct signature
+        drift_results = safe_module_call(drift, "detect_data_drift", 
+                                       processed_data_path=processed_path,
+                                       reference_path=None)  # Use default latest reference
         
         # Determine if drift was detected
         drift_detected = drift_results.get('drift_detected', False)
@@ -806,14 +809,24 @@ def model_explainability(**context):
         logger.warning("No training results found for explainability task")
         return None
     
-    # Create explainer
-    explainer = model_explainability.ModelExplainer()
-    
     try:
+        # Load the data
+        data = pd.read_parquet(processed_path)
+        X = data.drop('target', axis=1)  # Assuming 'target' is the target column
+        y = data['target']
+        
+        # Get the model from MLflow
+        model = mlflow.sklearn.load_model(f"models:/{best_model_id}/Production")
+        
+        # Create explainer with correct class name
+        explainer = model_explainability.ModelExplainabilityTracker(model_id=best_model_id)
+        
         # Generate explanations
-        explanation_results = explainer.explain_model(
-            model_id=best_model_id,
-            processed_data_path=processed_path
+        explanation_results = explainer.track_model_and_data(
+            model=model,
+            X=X,
+            y=y,
+            run_id=None  # We don't want to log these explanations as part of training
         )
         
         if explanation_results:
@@ -830,69 +843,6 @@ def model_explainability(**context):
     except Exception as e:
         logger.error(f"Error generating model explanations: {str(e)}")
         # Don't fail the pipeline for explainability issues
-        return None
-
-def generate_predictions(**context):
-    """Generate predictions using the best model"""
-    logger.info("Starting predictions generation task")
-    
-    ti = context['ti']
-    
-    # Get best model ID from model comparison
-    best_model_id = ti.xcom_pull(task_ids='compare_models_task', key='best_model_id')
-    
-    if not best_model_id:
-        logger.warning("No best model ID found for predictions task")
-        return None
-    
-    # First check for data at the standardized location
-    if os.path.exists(LOCAL_PROCESSED_PATH):
-        processed_path = LOCAL_PROCESSED_PATH
-        logger.info(f"Using data from standardized location: {processed_path}")
-    else:
-        # Get processed data path from XCom
-        processed_path = ti.xcom_pull(task_ids='preprocess_data_task', key='processed_data_path')
-        if not processed_path or not os.path.exists(processed_path):
-            raise AirflowException(f"Processed data path not found: {processed_path}")
-    
-    # Load the data
-    try:
-        data = pd.read_parquet(processed_path)
-        X = data.drop('target', axis=1)  # Assuming 'target' is the target column
-        y = data['target']
-    except Exception as e:
-        logger.error(f"Error loading data for predictions: {str(e)}")
-        return None
-    
-    # Create evaluator which has prediction functionality
-    evaluator = model_evaluation.ModelEvaluation()
-    
-    try:
-        # Get the model from MLflow
-        model = mlflow.sklearn.load_model(f"models:/{best_model_id}/Production")
-        
-        # Generate predictions using the evaluate_model method
-        prediction_results = evaluator.evaluate_model(
-            model=model,
-            X_test=X,
-            y_test=y,
-            run_id=None  # We don't want to log these predictions as evaluation metrics
-        )
-        
-        if prediction_results and prediction_results['status'] == 'success':
-            logger.info(f"Generated predictions for model {best_model_id}")
-            
-            # Store prediction results
-            ti.xcom_push(key='prediction_results', value=prediction_results)
-            
-            return prediction_results
-        else:
-            logger.warning(f"No predictions generated for model {best_model_id}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error generating predictions: {str(e)}")
-        # Don't fail the pipeline for prediction issues
         return None
 
 def model_evaluation(**context):
@@ -917,8 +867,8 @@ def model_evaluation(**context):
         if not processed_path or not os.path.exists(processed_path):
             raise AirflowException(f"Processed data path not found: {processed_path}")
     
-    # Create evaluator
-    evaluator = model_evaluation.ModelEvaluator()
+    # Create evaluator with correct class name
+    evaluator = model_evaluation.ModelEvaluation()
     
     # Evaluate all models
     evaluation_results = {}
@@ -930,11 +880,16 @@ def model_evaluation(**context):
             
             if model is not None:
                 try:
+                    # Load the data
+                    data = pd.read_parquet(processed_path)
+                    X = data.drop('target', axis=1)  # Assuming 'target' is the target column
+                    y = data['target']
+                    
                     # Evaluate this model
                     metrics = evaluator.evaluate_model(
                         model=model,
-                        model_id=model_id,
-                        processed_data_path=processed_path,
+                        X_test=X,
+                        y_test=y,
                         run_id=run_id
                     )
                     
@@ -992,19 +947,17 @@ def model_comparison(**context):
         if not processed_path or not os.path.exists(processed_path):
             raise AirflowException(f"Processed data path not found: {processed_path}")
     
-    # Create comparator
-    comparator = model_comparison.ModelComparator()
-    
-    # Compare models
+    # Compare models using the task-decorated function directly
     try:
-        comparison_results = comparator.compare_models(
-            evaluation_results=evaluation_results,
-            processed_data_path=processed_path
+        comparison_results = model_comparison.compare_model_results(
+            model_results=evaluation_results,
+            task_type='regression',
+            notify_slack=False
         )
         
         # If we have a best model, record it
         if comparison_results and comparison_results.get('best_model'):
-            best_model_id = comparison_results.get('best_model', {}).get('model_id')
+            best_model_id = comparison_results.get('best_model')
             logger.info(f"Selected best model: {best_model_id}")
             
             # Store the ID of the best model
@@ -1051,7 +1004,12 @@ def train_models(**context):
         raise AirflowException(f"Processed data path not found: {processed_path}")
     
     try:
-        training_results = training.train_models(processed_data_path=processed_path)
+        # Use the correct function name from the training module
+        training_results = training.train_multiple_models(
+            processed_path=processed_path,
+            parallel=True,
+            max_workers=MAX_WORKERS
+        )
         ti.xcom_push(key='training_results', value=training_results)
         return training_results
     except Exception as e:
@@ -1267,16 +1225,12 @@ with dag:
             trigger_rule='all_success',  # Only run if training was successful
         )
         
-        # Compare models task
-        model_comparison_task = PythonOperator(
-            task_id='model_comparison_task',
-            python_callable=model_comparison.compare_model_results,
-            op_kwargs={
-                'model_results': "{{ ti.xcom_pull(task_ids='train_models_group.train_models_task') }}",
-                'task_type': 'regression',
-            },
-            provide_context=True,
-            trigger_rule='all_success',  # Only run if training was successful
+        # Compare models task - using the task-decorated function directly
+        model_comparison_task = model_comparison.compare_model_results.override(
+            task_id='model_comparison_task'
+        )(
+            model_results="{{ ti.xcom_pull(task_ids='train_models_group.train_models_task') }}",
+            task_type='regression'
         )
         
         # Set dependencies within the group
