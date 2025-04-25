@@ -72,6 +72,7 @@ try:
     import tasks.model_explainability as model_explainability
     import tasks.hitl as hitl  # Import the new Human-in-the-Loop module
     import tasks.model_comparison as model_comparison  # Import model comparison module
+    from tasks.model_comparison import compare_model_results
 except ImportError as e:
     # Log the import error but continue - the specific module will fail at runtime if used
     logger.error(f"Error importing module: {str(e)}")
